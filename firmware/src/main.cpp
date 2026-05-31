@@ -26,6 +26,12 @@
 static constexpr unsigned long POLL_INTERVAL_MS = 4000;   // ~4s (contract 3-5s)
 static constexpr unsigned long HTTP_TIMEOUT_MS  = 2000;   // 2s per request
 static constexpr uint8_t       FAIL_BEFORE_OFFLINE = 3;   // 3 fails -> Offline
+// Self-heal: after a long run of TRANSPORT failures the WiFi/LWIP stack is usually
+// wedged (observed stuck at code=-1 for minutes; WiFi.reconnect() can't clear it),
+// so reboot to recover instead of staying dark until a manual reset. At the 4s poll
+// cadence this is ~5 min; a genuine long server outage just reboots periodically and
+// keeps retrying (harmless). Kept under the uint8_t 255 clamp.
+static constexpr uint8_t       FAIL_BEFORE_REBOOT  = 75;  // ~5 min of transport failure -> self-heal reboot
 static constexpr unsigned long WIFI_JOIN_TIMEOUT_MS = 12000;
 static constexpr int           WIFI_JOIN_ATTEMPTS   = 5;     // retry known-good NVS creds before the portal
 
@@ -443,6 +449,14 @@ void loop() {
       // and momentarily drops out of the Offline state.
       if (consecutiveFails < 255) consecutiveFails++;
       Serial.printf("frame fail     : code=%d fails=%u\n", r, consecutiveFails);
+      // Self-heal a wedged network stack: only on TRANSPORT errors (r <= 0) — an
+      // HTTP-status error (e.g. 500) is the server's problem and a reboot can't fix
+      // it. A reboot reliably clears a stuck WiFi/LWIP stack that reconnect cannot.
+      if (r <= 0 && consecutiveFails >= FAIL_BEFORE_REBOOT) {
+        Serial.println(F("frame fail     : prolonged transport failure -> self-heal reboot"));
+        delay(50);
+        ESP.restart();
+      }
     }
   }
 
