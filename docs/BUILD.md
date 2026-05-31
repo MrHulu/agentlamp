@@ -28,7 +28,7 @@ firmware drives (verify against the official Waveshare wiki for your revision):
 | LCD CS | 42 |
 | LCD DC | 41 |
 | LCD RST | 39 |
-| LCD backlight | 46 |
+| LCD backlight | 48 |
 | RGB LED | 38 |
 
 ## Local-mode quickstart (cloud-free)

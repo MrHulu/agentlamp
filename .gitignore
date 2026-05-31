@@ -38,3 +38,6 @@ data/
 # macOS
 .DS_Store
 
+# Generated design mockup renders (regenerable from docs/ui/mockups/scenes.html)
+docs/ui/mockups/render/
+

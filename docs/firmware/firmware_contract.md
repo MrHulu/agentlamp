@@ -116,7 +116,9 @@ Use official board docs for final pins. Current known pins:
 - LCD CS GPIO42.
 - LCD DC GPIO41.
 - LCD RST GPIO39.
-- LCD backlight GPIO46.
+- LCD backlight GPIO48. (The earlier GPIO46 here was stale — the authoritative espp
+  BSP, the ahmadrezarazian LovyanGFX reference, and the Waveshare wiki all give GPIO48;
+  GPIO46 would leave the backlight off and the screen dark. Firmware uses 48.)
 - RGB LED GPIO38.
 
 ## Firmware Acceptance

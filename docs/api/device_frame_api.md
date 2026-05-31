@@ -49,6 +49,7 @@ Tokens must not be placed in URLs. The path is versioned (`/api/v1/...`).
     {"provider": "Codex", "count": 3, "status": "CODING"},
     {"provider": "Claude", "count": 1, "status": "WAITING"}
   ],
+  "fleet_more": 0,
   "quota": [
     {
       "provider": "Codex",
@@ -65,6 +66,13 @@ Tokens must not be placed in URLs. The path is versioned (`/api/v1/...`).
   "server_time": 1716900400
 }
 ```
+
+- `fleet_more` (optional, integer): the count of fleet rows truncated beyond the
+  6-entry `fleet` cap (and any rows dropped by the 2 KB byte-cap trim). **Present
+  only when the count is > 0**; absent otherwise. The device may ignore it (it is
+  backward-compatible per the unknown-field rule) or render a "+N more" hint.
+- A `quota` entry carries **both** `w5` and `week` for one `(provider, account)`
+  when both windows are known; a window with no data is **omitted** (never `null`).
 
 ## Enums
 
