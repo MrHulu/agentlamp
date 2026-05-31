@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AgentLamp — device scene design board (172×320)</title>
+<style>
+  :root{
+    /* status palette — vivid for a glowing desk object, on near-black */
+    --idle:#4d7cff; --think:#6d6bff; --code:#a06bff; --read:#22d3ee;
+    --test:#2dd4a7; --wait:#ffb020; --done:#34d399; --err:#ff5470;
+    --off:#7b8696; --stale:#d6dae0;
+    --ink:#eef1f6; --ink-dim:#9aa3b2; --ink-faint:#5b6473;
+    --screen:#080a10;
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0c0d11;color:var(--ink);font-family:var(--font);
+       padding:48px 40px 80px;-webkit-font-smoothing:antialiased}
+  .head{max-width:1180px;margin:0 auto 40px}
+  .head h1{font-size:26px;font-weight:800;letter-spacing:-.02em}
+  .head p{color:var(--ink-dim);font-size:14px;margin-top:8px;line-height:1.5;max-width:720px}
+  .legend{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:18px;font:600 11px/1 var(--mono);text-transform:uppercase;letter-spacing:.08em}
+  .legend span{display:flex;align-items:center;gap:7px;color:var(--ink-dim)}
+  .legend i{width:10px;height:10px;border-radius:50%;display:inline-block}
+
+  .grid{max-width:1180px;margin:0 auto;display:grid;
+        grid-template-columns:repeat(auto-fill,minmax(172px,1fr));gap:44px 34px;justify-items:center}
+  .cell{display:flex;flex-direction:column;align-items:center;gap:14px;width:172px}
+  .cap{text-align:center}
+  .cap b{font-size:13px;font-weight:700;letter-spacing:-.01em}
+  .cap span{display:block;color:var(--ink-faint);font:500 11px/1.4 var(--mono);margin-top:4px}
+
+  /* physical device: 172x320 panel, rounded corners, bezel, status glow */
+  .device{position:relative;width:172px;height:320px;border-radius:24px;
+          background:#000;padding:8px;box-shadow:0 18px 40px -16px rgba(0,0,0,.9),0 0 0 1px #1c1f27;}
+  .device::after{content:"";position:absolute;inset:-22px;border-radius:38px;z-index:-1;
+          background:radial-gradient(60% 50% at 50% 42%,var(--glow,transparent),transparent 70%);
+          opacity:.5;filter:blur(6px)}
+  .screen{position:relative;width:156px;height:304px;border-radius:17px;overflow:hidden;
+          background:
+            radial-gradient(120% 80% at 50% -10%,color-mix(in srgb,var(--accent,#111) 30%,transparent),transparent 60%),
+            radial-gradient(120% 70% at 50% 115%,color-mix(in srgb,var(--accent,#111) 16%,transparent),transparent 55%),
+            var(--screen);
+          display:flex;flex-direction:column;padding:16px 15px 15px}
+  .screen::before{content:"";position:absolute;inset:0;border-radius:17px;
+          box-shadow:inset 0 0 0 1px rgba(255,255,255,.04);pointer-events:none}
+
+  /* top bar */
+  .top{display:flex;justify-content:space-between;align-items:center;font:600 10px/1 var(--mono);
+       letter-spacing:.06em;color:var(--ink-dim);text-transform:uppercase}
+  .top .who{display:flex;align-items:center;gap:6px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent)}
+  .mid{flex:1;display:flex;flex-direction:column;justify-content:center}
+  .bot{margin-top:auto}
+
+  /* dominant status word */
+  .status{font-weight:800;letter-spacing:-.03em;line-height:.92;
+          color:var(--accent);text-shadow:0 0 22px color-mix(in srgb,var(--accent) 55%,transparent)}
+  .kicker{font:600 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint)}
+  .meta{font:600 12px/1.35 var(--font);color:var(--ink)}
+  .meta .sub{color:var(--ink-dim);font-weight:500}
+  .mono{font-family:var(--mono)}
+
+  /* fleet rows */
+  .rows{display:flex;flex-direction:column;gap:9px}
+  .row{display:flex;align-items:center;gap:8px;font:600 12px/1 var(--font)}
+  .row .nm{color:var(--ink)}.row .nm .ac{color:var(--ink-faint);font-weight:500}
+  .row .st{margin-left:auto;font:700 9px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;
+           padding:3px 6px;border-radius:5px;color:var(--c);background:color-mix(in srgb,var(--c) 16%,transparent)}
+
+  /* quota bars */
+  .q{display:flex;flex-direction:column;gap:5px;margin-bottom:13px}
+  .q .ql{display:flex;justify-content:space-between;font:600 11px/1 var(--font);color:var(--ink)}
+  .q .ql .w{color:var(--ink-faint);font-family:var(--mono);font-size:10px}
+  .bar{height:7px;border-radius:4px;background:rgba(255,255,255,.07);overflow:hidden}
+  .bar i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,color-mix(in srgb,var(--c) 60%,#000),var(--c));
+         box-shadow:0 0 10px var(--c)}
+  .pct{font:700 11px/1 var(--mono);color:var(--c)}
+
+  /* fleet dot strip */
+  .strip{display:flex;gap:5px;align-items:center}
+  .strip i{width:9px;height:9px;border-radius:50%}
+  .glow{box-shadow:0 0 7px currentColor}
+
+  /* alert ring */
+  .ring{width:96px;height:96px;border-radius:50%;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;
+        border:3px solid var(--accent);box-shadow:0 0 26px color-mix(in srgb,var(--accent) 60%,transparent),inset 0 0 18px color-mix(in srgb,var(--accent) 30%,transparent)}
+  .ring b{font:800 30px/1 var(--font);color:var(--accent)}
+
+  /* boot / sleep */
+  .center{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:10px}
+  .lamp{font-size:34px;filter:drop-shadow(0 0 14px var(--accent))}
+  .clock{font:300 52px/1 var(--font);letter-spacing:-.03em;color:var(--ink)}
+  .tiny{font:600 10px/1.5 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint)}
+  .code{font:800 30px/1 var(--mono);letter-spacing:.12em;color:var(--accent);text-shadow:0 0 18px color-mix(in srgb,var(--accent) 50%,transparent)}
+  .diag{display:flex;flex-direction:column;gap:7px;font:600 11px/1 var(--mono);color:var(--ink-dim)}
+  .diag .ln{display:flex;justify-content:space-between}.diag .ok{color:var(--done)}
+</style>
+</head>
+<body>
+<div class="head">
+  <h1>AgentLamp — Device Scene Design Board</h1>
+  <p>Waveshare ESP32-S3-LCD-1.47B · 172×320 portrait · ambient desk orb. One dominant element per scene; the
+     dominant status drives a single accent that washes the screen <b>and</b> the physical RGB LED. Dark base so
+     status glows. Sanitized sample data only (project-a, main/work, Codex/Claude) — matches the sanitization policy.</p>
+  <div class="legend">
+    <span><i style="background:var(--code)"></i>coding</span>
+    <span><i style="background:var(--think)"></i>thinking</span>
+    <span><i style="background:var(--read)"></i>reading</span>
+    <span><i style="background:var(--test)"></i>testing</span>
+    <span><i style="background:var(--wait)"></i>waiting</span>
+    <span><i style="background:var(--done)"></i>done</span>
+    <span><i style="background:var(--idle)"></i>idle</span>
+    <span><i style="background:var(--err)"></i>error</span>
+    <span><i style="background:var(--off)"></i>offline</span>
+    <span><i style="background:var(--stale)"></i>stale</span>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- BOOT -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--stale);--glow:rgba(214,218,224,.10)">
+      <div class="screen">
+        <div class="center">
+          <div class="lamp">◗</div>
+          <div style="font:800 21px/1 var(--font);letter-spacing:-.02em">AgentLamp</div>
+          <div class="tiny">starting · v0.1</div>
+        </div>
+        <div class="bot tiny" style="text-align:center;opacity:.7">local mode</div>
+      </div>
+    </div>
+    <div class="cap"><b>Boot</b><span>identity · version</span></div>
+  </div>
+
+  <!-- PAIRING -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--read);--glow:rgba(34,211,238,.14)">
+      <div class="screen">
+        <div class="top"><span class="who">pair</span><span>—</span></div>
+        <div class="center" style="gap:14px">
+          <div class="tiny">enter on laptop</div>
+          <div class="code">7F3A&#8209;9C</div>
+          <div class="tiny" style="color:var(--ink-dim)">agentlamp device pair</div>
+        </div>
+        <div class="bot tiny" style="text-align:center;opacity:.7">code expires 10:00</div>
+      </div>
+    </div>
+    <div class="cap"><b>Pairing</b><span>one-time code</span></div>
+  </div>
+
+  <!-- FLEET -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--wait);--glow:rgba(255,176,32,.13)">
+      <div class="screen">
+        <div class="top"><span class="who"><i class="dot"></i>agents</span><span>14:32</span></div>
+        <div class="mid">
+          <div class="rows">
+            <div class="row"><span class="nm">Claude <span class="ac">·work</span></span><span class="st" style="--c:var(--wait)">wait</span></div>
+            <div class="row"><span class="nm">Codex <span class="ac">·main</span></span><span class="st" style="--c:var(--code)">code</span></div>
+            <div class="row"><span class="nm">Claude <span class="ac">·main</span></span><span class="st" style="--c:var(--test)">test</span></div>
+            <div class="row"><span class="nm">Codex <span class="ac">·work</span></span><span class="st" style="--c:var(--idle)">idle</span></div>
+          </div>
+        </div>
+        <div class="bot">
+          <div class="strip" style="margin-bottom:7px">
+            <i class="glow" style="background:var(--wait);color:var(--wait)"></i>
+            <i class="glow" style="background:var(--code);color:var(--code)"></i>
+            <i class="glow" style="background:var(--test);color:var(--test)"></i>
+            <i style="background:var(--off)"></i>
+          </div>
+          <div class="tiny">3 active · <span style="color:var(--wait)">1 waiting</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>Fleet</b><span>home · overview</span></div>
+  </div>
+
+  <!-- FOCUS -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--code);--glow:rgba(160,107,255,.16)">
+      <div class="screen">
+        <div class="top"><span class="who"><i class="dot"></i>focus</span><span>14:32</span></div>
+        <div class="mid">
+          <div class="kicker" style="margin-bottom:6px">Claude · work</div>
+          <div class="status" style="font-size:34px">CODING</div>
+          <div class="meta" style="margin-top:14px">project-a<br><span class="sub">implementing</span></div>
+        </div>
+        <div class="bot tiny">3:12 elapsed · seq 1852</div>
+      </div>
+    </div>
+    <div class="cap"><b>Focus</b><span>top active session</span></div>
+  </div>
+
+  <!-- QUOTA -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--wait);--glow:rgba(255,176,32,.12)">
+      <div class="screen">
+        <div class="top"><span class="who"><i class="dot"></i>quota</span><span>14:32</span></div>
+        <div class="mid">
+          <div class="q" style="--c:var(--err)">
+            <div class="ql"><span>Codex <span style="color:var(--ink-faint)">·main</span></span><span class="w">5h</span></div>
+            <div class="bar"><i style="width:72%"></i></div>
+            <div style="display:flex;justify-content:space-between"><span class="pct">72%</span><span class="tiny" style="color:var(--ink-faint)">est</span></div>
+          </div>
+          <div class="q" style="--c:var(--test)">
+            <div class="ql"><span>Claude <span style="color:var(--ink-faint)">·work</span></span><span class="w">week</span></div>
+            <div class="bar"><i style="width:41%"></i></div>
+            <div style="display:flex;justify-content:space-between"><span class="pct">41%</span><span class="tiny" style="color:var(--ink-faint)">est</span></div>
+          </div>
+        </div>
+        <div class="bot tiny">top 2 risk · confidence ◗◗</div>
+      </div>
+    </div>
+    <div class="cap"><b>Quota</b><span>top-2 risk · estimated</span></div>
+  </div>
+
+  <!-- ALERT -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--wait);--glow:rgba(255,176,32,.26)">
+      <div class="screen" style="background:
+          radial-gradient(120% 80% at 50% -5%,color-mix(in srgb,var(--wait) 38%,transparent),transparent 62%),
+          radial-gradient(120% 70% at 50% 115%,color-mix(in srgb,var(--wait) 18%,transparent),transparent 55%),var(--screen)">
+        <div class="top"><span class="who"><i class="dot"></i>alert</span><span>14:32</span></div>
+        <div class="mid" style="text-align:center">
+          <div class="ring"><b>!</b></div>
+          <div class="status" style="font-size:32px">WAITING</div>
+          <div class="meta" style="margin-top:12px">Claude · work<br><span class="sub">approval needed</span></div>
+        </div>
+        <div class="bot tiny" style="text-align:center">waiting 0:48</div>
+      </div>
+    </div>
+    <div class="cap"><b>Alert</b><span>interrupt · waiting/error</span></div>
+  </div>
+
+  <!-- ERROR (alert variant) -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--err);--glow:rgba(255,84,112,.24)">
+      <div class="screen" style="background:
+          radial-gradient(120% 80% at 50% -5%,color-mix(in srgb,var(--err) 34%,transparent),transparent 62%),
+          radial-gradient(120% 70% at 50% 115%,color-mix(in srgb,var(--err) 16%,transparent),transparent 55%),var(--screen)">
+        <div class="top"><span class="who"><i class="dot"></i>alert</span><span>14:33</span></div>
+        <div class="mid" style="text-align:center">
+          <div class="ring"><b>×</b></div>
+          <div class="status" style="font-size:40px">ERROR</div>
+          <div class="meta" style="margin-top:12px">Codex · main<br><span class="sub">tool_error</span></div>
+        </div>
+        <div class="bot tiny" style="text-align:center">project-b · seq 1861</div>
+      </div>
+    </div>
+    <div class="cap"><b>Alert · Error</b><span>same scene, red</span></div>
+  </div>
+
+  <!-- OFFLINE -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--off);--glow:rgba(123,134,150,.10)">
+      <div class="screen">
+        <div class="top"><span class="who"><i class="dot" style="box-shadow:none"></i>offline</span><span>14:35</span></div>
+        <div class="center">
+          <div class="status" style="font-size:30px;color:var(--off);text-shadow:none">OFFLINE</div>
+          <div class="meta sub" style="text-align:center">frame source<br>unreachable</div>
+        </div>
+        <div class="bot tiny" style="text-align:center">last seen 2m ago</div>
+      </div>
+    </div>
+    <div class="cap"><b>Offline</b><span>LAN/relay unreachable</span></div>
+  </div>
+
+  <!-- STALE -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--stale);--glow:rgba(214,218,224,.08)">
+      <div class="screen">
+        <div class="top"><span class="who"><i class="dot"></i>stale</span><span>14:34</span></div>
+        <div class="mid">
+          <div class="kicker" style="margin-bottom:6px">Claude · work</div>
+          <div class="status" style="font-size:34px;color:var(--stale);text-shadow:none">CODING</div>
+          <div class="meta sub" style="margin-top:12px">showing cached</div>
+        </div>
+        <div class="bot tiny" style="color:var(--stale);opacity:.8">⟳ updated 2m ago</div>
+      </div>
+    </div>
+    <div class="cap"><b>Stale</b><span>cached · TTL expired</span></div>
+  </div>
+
+  <!-- SLEEP -->
+  <div class="cell">
+    <div class="device" style="--accent:#222;--glow:transparent">
+      <div class="screen" style="background:#050609">
+        <div class="center">
+          <div class="clock" style="opacity:.55">2:14</div>
+          <div class="tiny" style="opacity:.4">all idle</div>
+        </div>
+        <div class="bot" style="text-align:center"><i class="dot" style="background:var(--idle);opacity:.35;margin:0 auto;display:inline-block"></i></div>
+      </div>
+    </div>
+    <div class="cap"><b>Sleep</b><span>dim ambient · no activity</span></div>
+  </div>
+
+  <!-- DIAGNOSTICS -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--read);--glow:rgba(34,211,238,.10)">
+      <div class="screen">
+        <div class="top"><span class="who"><i class="dot"></i>diag</span><span>14:32</span></div>
+        <div class="mid">
+          <div class="diag">
+            <div class="ln"><span>wifi</span><span class="ok">−54 dBm</span></div>
+            <div class="ln"><span>source</span><span class="ok">LAN</span></div>
+            <div class="ln"><span>frame</span><span>v1 · seq 1852</span></div>
+            <div class="ln"><span>fetch</span><span class="ok">182 ms</span></div>
+            <div class="ln"><span>heap</span><span>148 KB</span></div>
+            <div class="ln"><span>psram</span><span class="ok">ok</span></div>
+          </div>
+        </div>
+        <div class="bot tiny">hold button 5s → reset</div>
+      </div>
+    </div>
+    <div class="cap"><b>Diagnostics</b><span>net · frame · health</span></div>
+  </div>
+
+  <!-- THINKING (status sampler) -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--think);--glow:rgba(109,107,255,.15)">
+      <div class="screen">
+        <div class="top"><span class="who"><i class="dot"></i>focus</span><span>14:36</span></div>
+        <div class="mid">
+          <div class="kicker" style="margin-bottom:6px">Codex · main</div>
+          <div class="status" style="font-size:26px">THINKING</div>
+          <div class="meta sub" style="margin-top:14px">project-b</div>
+        </div>
+        <div class="bot tiny">compacting…</div>
+      </div>
+    </div>
+    <div class="cap"><b>Focus · Thinking</b><span>status color sampler</span></div>
+  </div>
+
+  <!-- DONE (status sampler) -->
+  <div class="cell">
+    <div class="device" style="--accent:var(--done);--glow:rgba(52,211,153,.15)">
+      <div class="screen">
+        <div class="top"><span class="who"><i class="dot"></i>focus</span><span>14:38</span></div>
+        <div class="mid">
+          <div class="kicker" style="margin-bottom:6px">Claude · work</div>
+          <div class="status" style="font-size:48px">DONE</div>
+          <div class="meta sub" style="margin-top:14px">project-a · turn complete</div>
+        </div>
+        <div class="bot tiny">idle in 30s</div>
+      </div>
+    </div>
+    <div class="cap"><b>Focus · Done</b><span>status color sampler</span></div>
+  </div>
+
+</div>
+</body>
+</html>
