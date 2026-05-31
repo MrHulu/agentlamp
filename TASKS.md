@@ -33,14 +33,6 @@
   - **Gate:** fits the memory budget (PSRAM confirmed); malformed JSON never crashes; no
     token/full-frame over serial.
 
-- [ ] TASK-005: Wire Codex + Claude hook adapters (fire-and-forget)
-  - TASK-005A: provider normalization models + sanitizer fixtures (depends on TASK-003 gate).
-  - TASK-005B: Codex `hook_sink` — append-to-local-queue + return <1 s, zero network I/O.
-  - TASK-005C: Claude `hook_sink` — same; tolerate unknown hook event names (no hard-fail).
-  - TASK-005D: render concurrent Codex+Claude sessions in simulator.
-  - TASK-005E: keep quota `manual`/`unknown` unless a stable explicit source is documented.
-  - Gate: prove no prompt/transcript/source path/command/tool content upload via tests.
-
 - [ ] TASK-006: Pairing, device binding, token rotation (local admin)
   - One-time pairing **code** exchanged for a read-only token (token never in URL/QR; server
     stores hash). Device↔collector binding. `collector_id`/`device_id` charset enforced.
@@ -55,8 +47,27 @@
 - [ ] TASK-008: 24-hour stability + weak-network test
   - Restart recovery, Wi-Fi loss/recovery, malformed JSON, memory/flicker, poison-event drain.
 
+## vNext — usability (post-TASK-005) · spec: `docs/devlog/08-vnext-requirements.md`
+
+- [ ] TASK-009 (P0): Codex sessions on the lamp — install user-level `~/.codex/config.toml`
+  hooks (trust persisted) + LIVE-verify a real Codex session drives the orb (R1).
+- [ ] TASK-010 (P0): Fleet count semantics — count ACTIVE agents, not idle/done; decide
+  `xN` vs `active/total` display (R2).
+- [ ] TASK-011 (P0): Verify + polish the physical LCD layout via `/preview` screenshots
+  (focus, 2/3/6-project fleet, long names, alert); fix truncation; re-flash + eyeball (R3).
+- [ ] TASK-012 (P1): Per-session identity for same-folder sessions — design spike first
+  (accept-aggregate vs discriminator vs `session_title`) (R4).
+- [ ] TASK-013 (P1): Fleet status breakdown — show the mix, not just the dominant (R5).
+- [ ] TASK-014 (P2): Ops hardening — log rotation, commit launchd plists + runbook (R6).
+- [ ] TASK-015 (P2): Quota/usage on the lamp — a real source beyond manual entry (R7).
+
 ## Done
 
+- [x] TASK-005: Wire Codex + Claude hook adapters (fire-and-forget) ✅ 2026-05-31
+  - Live: real hook pipeline → orb; dual Claude+Codex normalize; readable local labels /
+    relay HMAC; offline-only-on-dead-collector; fleet overview; firmware self-heal.
+  - Commits `8d525f4` (collector) · `de1e9f4` (server) · `7b7b969` (firmware). 48+113 tests.
+  - Follow-ups split into vNext (TASK-009..015) — see `docs/devlog/08-vnext-requirements.md`.
 - [x] Multi-AI council design review (4 AIs) + P0/P1 hardening of the doc set ✅ 2026-05-30
   - Local-first reframe; sanitization mechanism; multi-tenant decision (single-owner v1);
     hook fire-and-forget; ingest hardening; firmware reality; open-source scaffolding.
