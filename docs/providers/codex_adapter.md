@@ -70,36 +70,30 @@ Do not upload:
 
 ## Codex Config Sketch
 
-This is a contract sketch, not a ready-to-run command:
+Same single sink, `--provider codex`. Generate the current block (double-table
+`[[hooks.<Event>]]` / `[[hooks.<Event>.hooks]]` form, verified 2026) rather than
+copying a static sketch:
+
+```bash
+python3 -m collector.install_hooks --print codex                       # print only
+python3 -m collector.install_hooks --write-codex ~/.codex/config.toml   # opt-in append + .bak
+```
 
 ```toml
-[[hooks.UserPromptSubmit]]
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
-command = "python3 /path/to/agentlamp/src/collector/adapters/codex/hook_sink.py"
-timeout = 5
-statusMessage = "Updating AgentLamp"
-
 [[hooks.PreToolUse]]
-matcher = ".*"
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "python3 /path/to/agentlamp/src/collector/adapters/codex/hook_sink.py"
-timeout = 5
-
-[[hooks.PermissionRequest]]
-matcher = ".*"
-[[hooks.PermissionRequest.hooks]]
-type = "command"
-command = "python3 /path/to/agentlamp/src/collector/adapters/codex/hook_sink.py"
-timeout = 5
-
-[[hooks.Stop]]
-[[hooks.Stop.hooks]]
-type = "command"
-command = "python3 /path/to/agentlamp/src/collector/adapters/codex/hook_sink.py"
+command = "<python> <repo>/src/collector/hook_sink.py --provider codex"
 timeout = 5
 ```
+
+**Gotchas (verified):** Codex requires *persisted hook trust* (or
+`--dangerously-bypass-hook-trust` for a one-off). Use **user-level**
+`~/.codex/config.toml` — repo-local `.codex/config.toml` hooks may not fire in
+interactive sessions (openai/codex#17532). Stdin is snake_case
+(`session_id`, `turn_id`, `cwd`, `tool_name`, `tool_input`, `model`,
+`permission_mode`). The legacy `--notify` path is unrelated: it fires
+`agent-turn-complete` via `argv[1]` (kebab-case), **not** `AfterAgent`/`AfterToolUse`.
 
 ## Cloud Task Source
 

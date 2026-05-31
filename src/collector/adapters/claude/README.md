@@ -1,10 +1,16 @@
-# Claude Adapter Placeholder
+# Claude Adapter
 
-Contract: `docs/providers/claude_adapter.md`.
+Contract: `docs/providers/claude_adapter.md`. Implementation is the shared sink +
+daemon in the parent dir — there is **one** `hook_sink.py`, selected per provider:
 
-Primary source: Claude Code lifecycle hooks.
+```
+python3 <repo>/src/collector/hook_sink.py --provider claude
+```
 
-Optional later source: redacted OpenTelemetry with prompt/tool detail gates disabled.
+Wire it with `python3 -m collector.install_hooks --print claude`. Primary source:
+Claude Code lifecycle hooks (verified-current event set incl. `PostToolUseFailure`
++ `PermissionRequest`). Optional later source: redacted OpenTelemetry with
+prompt/tool detail gates disabled.
 
 Never upload:
 

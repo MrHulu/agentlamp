@@ -77,65 +77,35 @@ Do not upload:
 - prompt text
 - `tool_input.file_path`
 - `tool_input.content`
-- `tool_response`
+- `tool_result` (current field name) / `tool_response` (older builds — guard for both)
 - raw Bash command
 - transcript lines
 - model output
 
 ## Claude Settings Sketch
 
-This is a contract sketch, not a ready-to-run command:
+The collector is a single fire-and-forget sink — `src/collector/hook_sink.py --provider claude`
+— wired to each lifecycle event. Generate the current, ready-to-paste block (it
+resolves absolute paths + the repo venv) instead of copying a static sketch that can drift:
+
+```bash
+python3 -m collector.install_hooks --print claude     # print only (never writes)
+python3 -m collector.install_hooks --write-claude ~/.claude/settings.json   # opt-in additive merge + .bak
+```
+
+Verified-current event set (2026): `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PostToolUse`, **`PostToolUseFailure`** (the *separate* failure event — `PostToolUse`
+itself carries no error and its output field is `tool_result`, not `tool_response`),
+**`PermissionRequest`** (a distinct approval event), `Notification` (uses
+`notification_type` = `permission_prompt`/`idle_prompt` to flag a wait), `Stop`,
+`SessionEnd`. `matcher` is omitted so every tool/notification fires the sink.
+
+Shape (per event):
 
 ```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /path/to/agentlamp/src/collector/adapters/claude/hook_sink.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /path/to/agentlamp/src/collector/adapters/claude/hook_sink.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /path/to/agentlamp/src/collector/adapters/claude/hook_sink.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /path/to/agentlamp/src/collector/adapters/claude/hook_sink.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
-}
+{ "hooks": { "<Event>": [ { "hooks": [
+  { "type": "command", "command": "<python> <repo>/src/collector/hook_sink.py --provider claude", "timeout": 5 }
+] } ] } }
 ```
 
 ## Optional OTel Source
