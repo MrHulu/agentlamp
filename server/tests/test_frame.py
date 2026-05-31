@@ -383,17 +383,38 @@ def test_stale_after_120s(monkeypatch):
     assert frame["accent"] == "white"
 
 
-def test_offline_after_600s(monkeypatch):
+def test_aged_active_session_sleeps_when_collector_alive(monkeypatch):
+    """THOROUGH offline fix: an ACTIVE session that goes silent for >600s must NOT
+    paint the orb 'offline' while the collector is alive — 'offline' is reserved
+    for a DEAD collector. A silent-but-alive system sleeps (calm)."""
     import agentlamp_server.state as state_mod
 
     st = _state()
     _inject(st, provider="claude", account="work", status="CODING")
     base = state_mod._now()
     monkeypatch.setattr(state_mod, "_now", lambda: base + 700)
-    st.last_collector_heartbeat = base + 700  # collector alive, session dead
+    st.last_collector_heartbeat = base + 700  # collector ALIVE
     frame = st.build_frame("orb-01")
-    assert frame["scene"] == "offline"
-    assert frame["accent"] == "muted"
+    assert frame["scene"] == "sleep"
+
+
+def test_offline_only_from_dead_collector(monkeypatch):
+    """The ONLY path to the offline scene is a stale collector heartbeat — never
+    aged sessions, no matter how many or how old (regression for the Boss's
+    'frequently shows offline' report)."""
+    import agentlamp_server.state as state_mod
+
+    st = _state()
+    _inject(st, provider="claude", account="a", status="CODING")
+    _inject(st, provider="codex", account="b", status="TESTING")
+    base = state_mod._now()
+    monkeypatch.setattr(state_mod, "_now", lambda: base + 700)
+    # Collector ALIVE, every session aged 700s → sleep, NOT offline.
+    st.last_collector_heartbeat = base + 700
+    assert st.build_frame("orb-01")["scene"] == "sleep"
+    # Collector DEAD (heartbeat 700s stale) → the one true offline.
+    st.last_collector_heartbeat = base
+    assert st.build_frame("orb-01")["scene"] == "offline"
 
 
 def test_collector_heartbeat_lost_is_offline(monkeypatch):
@@ -405,6 +426,100 @@ def test_collector_heartbeat_lost_is_offline(monkeypatch):
     monkeypatch.setattr(state_mod, "_now", lambda: base + 100)  # > 90s heartbeat
     frame = st.build_frame("orb-01")
     assert frame["scene"] == "offline"
+
+
+def test_done_session_sleeps_not_offline_when_aged(monkeypatch):
+    """Regression: a cleanly-finished DONE session sitting idle between turns must
+    SLEEP, not flip to an alarming OFFLINE while the user reads/steps away (an
+    interactive session flapped offline ~10 min after each turn's Stop->DONE).
+    Only an ACTIVE session that vanishes mid-work should go offline."""
+    import agentlamp_server.state as state_mod
+
+    st = _state()
+    _inject(st, provider="claude", account="work", status="DONE")
+    base = state_mod._now()
+    monkeypatch.setattr(state_mod, "_now", lambda: base + 700)  # well past OFFLINE window
+    st.last_collector_heartbeat = base + 700  # collector alive (daemon heart-beating)
+    frame = st.build_frame("orb-01")
+    assert frame["scene"] == "sleep"
+
+
+def test_idle_session_sleeps_not_offline_when_aged(monkeypatch):
+    import agentlamp_server.state as state_mod
+
+    st = _state()
+    _inject(st, provider="claude", account="work", status="IDLE")
+    base = state_mod._now()
+    monkeypatch.setattr(state_mod, "_now", lambda: base + 700)
+    st.last_collector_heartbeat = base + 700
+    assert st.build_frame("orb-01")["scene"] == "sleep"
+
+
+# --------------------------------------------------------------------------- #
+# Readable local-display labels + multi-session fleet (Boss 2026: orb unreadable —
+# opaque hash + flickering single focus across same-project sessions).
+# --------------------------------------------------------------------------- #
+def _inject_sid(st, sid, **kw):
+    ev = {
+        "schema_version": 1,
+        "provider": kw.get("provider", "claude"),
+        "provider_session_id": sid,
+        "event_time": 1716900398,
+        "payload": {
+            "status": kw.get("status", "CODING"),
+            "task_label": "implementing",
+            "project_alias": kw.get("project", "project-a"),
+            "account_alias": "main",
+        },
+    }
+    st.apply_event(ev)
+    st.collector_heartbeat()
+
+
+def test_local_display_keeps_readable_multi_segment_label():
+    """Local frame server shows a readable multi-segment folder name verbatim
+    (moza-perception-analysis), not an opaque HMAC hash."""
+    st = _state()  # local_display defaults ON
+    _inject_sid(st, "hmac:s1", project="moza-perception-analysis", status="CODING")
+    assert st.build_frame("orb-01")["primary"]["project"] == "moza-perception-analysis"
+
+
+def test_multiple_active_sessions_show_fleet_not_focus():
+    """>= 2 agents working at once → a STABLE 'AGENTS' overview, not a single focus
+    that flickers between sessions the user can't tell apart."""
+    st = _state()
+    _inject_sid(st, "hmac:a", project="ai-center", status="CODING")
+    _inject_sid(st, "hmac:b", project="ai-center", status="READING")
+    f = st.build_frame("orb-01")
+    assert f["scene"] == "fleet" and f["headline"] == "AGENTS"
+
+
+def test_single_active_session_is_focus():
+    st = _state()
+    _inject_sid(st, "hmac:a", project="ai-center", status="CODING")
+    assert st.build_frame("orb-01")["scene"] == "focus"
+
+
+def test_fleet_groups_by_project_with_count():
+    """Fleet rows group by project and show 'project xN', so a glance maps to which
+    project + how many agents — the core fix for 5 same-folder sessions."""
+    st = _state()
+    for i in range(5):
+        _inject_sid(st, f"hmac:c{i}", project="ai-center", status="CODING")
+    _inject_sid(st, "hmac:d", project="agentlamp", status="READING")
+    labels = [row["provider"] for row in st.build_frame("orb-01")["fleet"]]
+    assert "ai-center x5" in labels
+    assert "agentlamp" in labels  # count 1 → no suffix
+
+
+def test_waiting_still_interrupts_busy_fleet():
+    """A genuine WAITING agent still raises the alert even amid a busy fleet — the
+    one actionable signal is never buried."""
+    st = _state()
+    _inject_sid(st, "hmac:a", project="ai-center", status="CODING")
+    _inject_sid(st, "hmac:b", project="ai-center", status="CODING")
+    _inject_sid(st, "hmac:c", project="agentlamp", status="WAITING")
+    assert st.build_frame("orb-01")["scene"] == "alert"
 
 
 # --------------------------------------------------------------------------- #

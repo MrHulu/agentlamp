@@ -241,6 +241,8 @@ def _to_envelope(body: dict) -> dict:
     payload: dict = {}
     if "status" in body:
         payload["status"] = body["status"]
+    if "status_detail" in body:
+        payload["status_detail"] = body["status_detail"]
     if "tool_category" in body:
         payload["tool_category"] = body["tool_category"]
     if "task" in body or "task_label" in body:

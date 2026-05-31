@@ -194,14 +194,32 @@ def looks_like_neutral_alias(value: str) -> bool:
     return _ALIAS_SHAPE_RE.match(value) is not None
 
 
-def coerce_alias(value: str, pepper: bytes, *, prefix: str, n: int = 6) -> str:
+# Readable display label for LOCAL single-owner mode: lowercase alnum with single
+# ``-``/``_`` separators, any number of segments, bounded length (``ai-center``,
+# ``moza-perception-analysis``). Allowed verbatim ONLY when the caller passes
+# ``display=True`` — i.e. the local frame server, whose only viewer is the owner at
+# their own desk. Relay mode keeps the strict 2-segment neutral shape so a real cwd
+# basename can never reach a cloud relay operator verbatim.
+_DISPLAY_LABEL_RE = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+
+
+def looks_like_display_label(value: str) -> bool:
+    return bool(value) and len(value) <= 40 and _DISPLAY_LABEL_RE.match(value) is not None
+
+
+def coerce_alias(value: str, pepper: bytes, *, prefix: str, n: int = 6, display: bool = False) -> str:
     """Return ``value`` unchanged iff it is a neutral alias shape; otherwise
     HMAC-collapse it to an opaque keyed label ``<prefix>-<hmac_n>``.
 
     This is the positive-shape gate for the emit path: a non-neutral alias never
     survives verbatim. It is keyed (pepper) so a relay operator cannot brute-force
-    the collapsed value, and deterministic so the device sees a stable label."""
+    the collapsed value, and deterministic so the device sees a stable label.
+
+    ``display=True`` (local single-owner mode only) additionally lets a readable
+    multi-segment folder name through verbatim — see ``looks_like_display_label``."""
     if looks_like_neutral_alias(value):
+        return value
+    if display and looks_like_display_label(value):
         return value
     return f"{prefix}-{hmac_label(pepper, value, n=n)}"
 
@@ -584,6 +602,7 @@ def sanitize_event(
     aliases: AliasMap,
     pepper: bytes,
     stats: SanitizeStats | None = None,
+    local_display: bool = False,
 ) -> dict:
     """Validate + normalize a provider event envelope into a safe sanitized event.
 
@@ -665,7 +684,7 @@ def sanitize_event(
         assert_clean(pa, ph=ph)  # still hard-reject an embedded leak (path/key/…)
         if looks_like_prompt(pa):
             raise SanitizationError("project_alias_prompt_like", ph)
-        sp["project_alias"] = coerce_alias(pa, pepper, prefix="project", n=6)
+        sp["project_alias"] = coerce_alias(pa, pepper, prefix="project", n=6, display=local_display)
     if payload.get("account_alias") is not None:
         aa = str(payload["account_alias"])
         assert_clean(aa, ph=ph)

@@ -31,9 +31,11 @@ from . import sanitize as S
 # --------------------------------------------------------------------------- #
 # Liveness timeouts (architecture.md → Session Lifetime / Liveness).
 # --------------------------------------------------------------------------- #
-STALE_AFTER_S = 120
-OFFLINE_AFTER_S = 600
-COLLECTOR_HEARTBEAT_STALE_S = 90
+# Env-tunable (defaults match architecture.md). Lets an operator widen the windows
+# for a quieter lamp, or compress them for a fast end-to-end test.
+STALE_AFTER_S = float(os.environ.get("AGENTLAMP_STALE_AFTER_S", "120"))
+OFFLINE_AFTER_S = float(os.environ.get("AGENTLAMP_OFFLINE_AFTER_S", "600"))
+COLLECTOR_HEARTBEAT_STALE_S = float(os.environ.get("AGENTLAMP_HEARTBEAT_STALE_S", "90"))
 
 # Frame TTL (poll interval is 3-5 s; ttl is the firmware's grace window).
 FRAME_TTL = 5
@@ -195,6 +197,9 @@ class FrameState:
         self._lock = threading.RLock()
         self.pepper = pepper or _gen_pepper()
         self.aliases = aliases or S.AliasMap()
+        # Local single-owner lamp shows readable folder names (not HMAC hashes);
+        # a future relay would set this 0 to force opaque labels.
+        self.local_display = os.environ.get("AGENTLAMP_LOCAL_DISPLAY", "1") == "1"
         self.sessions: dict[tuple, Session] = {}
         self.quota: dict[tuple, QuotaWindow] = {}
         self.last_collector_heartbeat: float = _now()
@@ -266,7 +271,8 @@ class FrameState:
         with self._lock:
             try:
                 clean = S.sanitize_event(
-                    event, aliases=self.aliases, pepper=self.pepper
+                    event, aliases=self.aliases, pepper=self.pepper,
+                    local_display=self.local_display,
                 )
             except S.SanitizationError as exc:
                 self.rejection_count += 1
@@ -335,8 +341,17 @@ class FrameState:
 
     # -- liveness ------------------------------------------------------- #
     def _effective_status(self, s: Session, now: float) -> str:
-        """Apply TTL liveness: a session past STALE/OFFLINE windows is downgraded
-        so a dead session can never render as active."""
+        """Apply TTL liveness so a dead ACTIVE session can't render as active.
+
+        A cleanly-finished / idle session (DONE / IDLE) does NOT decay: it stays
+        DONE / IDLE so the scene selector sleeps it (calm) rather than flipping to
+        an alarming OFFLINE while the user reads or steps away between turns (each
+        interactive turn ends with Stop -> DONE). Only an ACTIVE session that
+        abruptly stops receiving events ages to STALE / OFFLINE — a real "the agent
+        vanished mid-work" signal — and a dead COLLECTOR is caught separately by
+        the heartbeat check in _select_scene."""
+        if s.status in ("DONE", "IDLE"):
+            return s.status
         age = now - s.updated_at
         if age > OFFLINE_AFTER_S:
             return "OFFLINE"
@@ -469,22 +484,34 @@ class FrameState:
             # Nothing known and no quota danger → sleep ambient (no activity).
             return ("sleep", None, "muted", SCENE_HEADLINE["sleep"])
 
+        # The collector is ALIVE here (the heartbeat check at the top didn't fire).
+        # "offline" means the COLLECTOR/daemon is down — full stop. Aged-out
+        # sessions must therefore NEVER paint the orb offline; with a live collector
+        # they are simply a calm idle. Partition into LIVE sessions (still fresh) and
+        # the actively-working subset.
+        live = [(s, e, sc) for (s, e, sc) in ordered if e not in ("OFFLINE", "STALE")]
+        active = [(s, e, sc) for (s, e, sc) in live if e not in ("IDLE", "DONE", "UNKNOWN")]
+
+        # Several agents working at once → a STABLE fleet overview ("AGENTS",
+        # grouped by project) instead of a single focus that flickers between
+        # sessions the user can't tell apart. A lone worker keeps the focus scene.
+        if len(active) >= 2:
+            top = active[0][0]
+            return ("fleet", top, STATUS_ACCENT.get(active[0][1], "blue"), SCENE_HEADLINE["fleet"])
+        if active:
+            s, e, _ = active[0]
+            return ("focus", s, STATUS_ACCENT.get(e, "blue"), SCENE_HEADLINE["focus"])
+
+        # Nobody actively working. Live-but-idle/done → calm sleep.
+        if live:
+            return ("sleep", live[0][0], "muted", SCENE_HEADLINE["sleep"])
+
+        # No live sessions, collector alive. Recently-quiet → mild "stale"; long
+        # gone → sleep. Neither is ever "offline" (reserved for a dead collector).
         top, top_eff, _top_score = ordered[0]
-
-        # All sessions effectively offline → offline scene.
-        if all(e == "OFFLINE" for _s, e, _sc in ordered):
-            return ("offline", None, STATUS_ACCENT["OFFLINE"], SCENE_HEADLINE["offline"])
-
-        # Top session stale → stale scene (show cached focus).
         if top_eff == "STALE":
             return ("stale", top, STATUS_ACCENT["STALE"], SCENE_HEADLINE["stale"])
-
-        # All idle/done → sleep ambient.
-        if all(e in ("IDLE", "DONE", "UNKNOWN") for _s, e, _sc in ordered):
-            return ("sleep", top, "muted", SCENE_HEADLINE["sleep"])
-
-        # Active highest-priority session → focus.
-        return ("focus", top, STATUS_ACCENT.get(top_eff, "blue"), SCENE_HEADLINE["focus"])
+        return ("sleep", top, "muted", SCENE_HEADLINE["sleep"])
 
     def _primary_block(self, s: Session, now: float) -> dict:
         eff = self._effective_status(s, now)
@@ -502,19 +529,28 @@ class FrameState:
 
         The frame's ``fleet`` is a list of ``{provider, count, status}`` rows
         (device_frame_api.md schema example)."""
-        # Group by (provider display, effective status), summing counts; keep
-        # the max score per group to order rows by priority.
-        groups: dict[tuple[str, str], dict] = {}
+        # Group by PROJECT (the readable label). For an owner running many agents
+        # the useful axis is "which project, how many, doing what" — not provider
+        # (usually all Claude). Each row's left label is "<project> xN" (when N>1)
+        # so the device renders it directly; the row's status is the group's
+        # highest-priority one (so a WAITING/ERROR agent surfaces in the row).
+        groups: dict[str, dict] = {}
         for s, eff, score in ordered:
-            disp = PROVIDER_DISPLAY.get(s.provider, s.provider.title())
-            k = (disp, eff)
-            g = groups.setdefault(k, {"provider": disp, "status": eff, "count": 0, "score": score})
-            g["count"] += 1
-            g["score"] = max(g["score"], score)
+            key = s.project_alias or "—"
+            g = groups.get(key)
+            if g is None:
+                groups[key] = {"project": key, "status": eff, "count": 1, "score": score}
+            else:
+                g["count"] += 1
+                if score > g["score"]:
+                    g["score"], g["status"] = score, eff
         rows = sorted(groups.values(), key=lambda r: r["score"], reverse=True)
         capped = rows[:6]
         overflow = sum(r["count"] for r in rows[6:])
-        out = [{"provider": r["provider"], "count": r["count"], "status": r["status"]} for r in capped]
+        out = []
+        for r in capped:
+            label = f"{r['project']} x{r['count']}" if r["count"] > 1 else r["project"]
+            out.append({"provider": label, "count": r["count"], "status": r["status"]})
         # Surface the overflow as the top-level ``fleet_more`` count (a documented
         # optional v1 frame key — device_frame_api.md → Array Caps + Frame Schema).
         # build_frame()/_enforce_byte_cap() attach it from this pending value.
