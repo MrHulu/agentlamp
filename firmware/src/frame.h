@@ -14,9 +14,13 @@
 static constexpr size_t FRAME_MAX_BYTES = 2048;   // hard cap from the contract
 static constexpr int    FRAME_SCHEMA_V  = 1;      // max supported schema version
 
-// small bounded string copies — provider/account/project/task are short labels
+// small bounded string copies — provider/account/project/task are short labels.
+// `provider` holds the CLEAN project label (server no longer bakes " xN" in). It must
+// hold the server's MAX label (sanitize.py ALIAS_MAX_LEN = 40) so a long-but-valid label
+// reaches drawFit intact and is shrunk/ellipsized cleanly — a buffer shorter than 41 would
+// HARD-truncate (e.g. mid-word, no ".." marker) before the renderer ever sees it.
 struct FleetRow {
-  char    provider[16];
+  char    provider[41];   // ALIAS_MAX_LEN (40) + NUL
   uint8_t count;
   Status  status;
 };
@@ -32,7 +36,7 @@ struct Frame {
   // primary session
   char    provider[16];
   char    account[16];
-  char    project[24];
+  char    project[41];   // ALIAS_MAX_LEN (40) + NUL — drawFit ellipsizes; never hard-cut
   char    task[24];
   Status  status = Status::UNKNOWN;
 

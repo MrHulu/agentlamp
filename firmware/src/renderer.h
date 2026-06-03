@@ -47,7 +47,10 @@ class Renderer {
   }
 
   // Draw `text` with datum `datum` at (x,y), choosing the largest font from the
-  // ladder whose measured width fits `maxW`. Never clips horizontally.
+  // ladder whose measured width fits `maxW`. Never clips horizontally: if even the
+  // smallest font overflows (e.g. a long project label in a narrow fleet cell), the
+  // string is shrunk to the readable floor THEN ellipsized with a ".." marker so it
+  // ends cleanly instead of running into the neighbouring cell.
   void drawFit(const char* text, int x, int y, int maxW, const Rgb& color,
                const lgfx::IFont* (*ladder)(int), textdatum_t datum = textdatum_t::middle_center) {
     if (!text || !text[0]) return;
@@ -60,7 +63,23 @@ class Renderer {
       if (_d.textWidth(text) <= maxW) break;   // largest that fits
     }
     if (chosen) _d.setFont(chosen);
-    _d.drawString(text, x, y);
+    if (_d.textWidth(text) <= maxW) {          // fits at the chosen font — done
+      _d.drawString(text, x, y);
+      _d.setTextDatum(textdatum_t::top_left);
+      return;
+    }
+    // Overflow at the smallest font: drop trailing chars + append ".." (ASCII, always
+    // in the font) until it fits. Keeps the cell boundary clean (no mid-glyph clip).
+    char buf[48];                              // > ALIAS_MAX_LEN(40) + ".." + NUL
+    size_t n = strlen(text);
+    if (n >= sizeof(buf) - 3) n = sizeof(buf) - 3;
+    while (n > 1) {
+      memcpy(buf, text, n);
+      buf[n] = '.'; buf[n + 1] = '.'; buf[n + 2] = '\0';
+      if (_d.textWidth(buf) <= maxW) { _d.drawString(buf, x, y); break; }
+      n--;
+    }
+    if (n <= 1) _d.drawString(text, x, y);     // pathological: draw raw (tiny cell)
     _d.setTextDatum(textdatum_t::top_left);
   }
 
@@ -140,30 +159,48 @@ class Renderer {
     bottom(meta, C_INK_FAINT);
   }
 
-  // Fleet: up to ~5 rows "provider ......... status", + summary.
+  // Fleet: up to ~5 rows "<project>  [xN]  status", + active summary.
+  // Layout (172 px wide, 8 px margins): status word right-aligned; an "xN" count
+  // badge (only when N>1) sits just left of it; the project name fills the left,
+  // shrinking/ellipsizing via drawFit so it never collides with the badge/status.
+  // The count is drawn from the structured `r.count` field (the server sends a CLEAN
+  // label) — so a long name can't carry a baked "xN", and the count never double-prints.
   void fleet(const Frame& f, const Rgb& accent, const char* clock) {
     bg();
     topBar("agents", accent, clock);
     int y = 80;
-    uint8_t n = f.fleetCount < 5 ? f.fleetCount : 5;
+    uint8_t n = f.fleetCount < 5 ? f.fleetCount : 5;   // panel fits 5 rows + summary
     for (uint8_t i = 0; i < n; i++) {
       const FleetRow& r = f.fleet[i];
       Rgb rc = statusColor(r.status);
-      // provider on the left (bounded to left 60% so it can't collide with the tag)
-      drawFit(r.provider, 14, y, 96, C_INK, mid, textdatum_t::middle_left);
+      // status word (right), 4-char lowercased — budget [110,158].
       char st[10];
       const char* w = statusWord(r.status);
       snprintf(st, sizeof(st), "%.4s", w);
       for (char* p = st; *p; ++p) *p = tolower(*p);
-      drawFit(st, LCD_WIDTH - 14, y, 56, rc, mid, textdatum_t::middle_right);
+      drawFit(st, LCD_WIDTH - 14, y, 48, rc, mid, textdatum_t::middle_right);
+      // The three cells are kept DISJOINT with a 6px clearance so a maximally-
+      // ellipsized long name never butts into the badge or the status word.
+      int nameMaxW = 90;                       // no badge: name [14,104], gap to status@110
+      if (r.count > 1) {
+        char badge[8];
+        snprintf(badge, sizeof(badge), "x%u", (unsigned)r.count);
+        drawFit(badge, LCD_WIDTH - 66, y, 26, C_INK_DIM, sm, textdatum_t::middle_right);  // [80,106]
+        nameMaxW = 60;                         // with badge: name [14,74], gap to badge@80
+      }
+      // project name (left), shrink/ellipsize within its budget.
+      drawFit(r.provider, 14, y, nameMaxW, C_INK, mid, textdatum_t::middle_left);
       y += 40;
     }
+    // Summary = total ACTIVE agents. Count ONLY the rows we actually drew; any active
+    // agents in undrawn rows (a 6th group the 5-row panel can't show) plus the server's
+    // fleet_more fold into "+N more", so the visible rows never disagree with the count.
     char summary[40];
-    int active = 0;
-    for (uint8_t i = 0; i < f.fleetCount; i++)
-      if (f.fleet[i].status != Status::IDLE && f.fleet[i].status != Status::OFFLINE) active++;
-    if (f.fleetMore > 0) snprintf(summary, sizeof(summary), "%d active  +%d more", active, f.fleetMore);
-    else                 snprintf(summary, sizeof(summary), "%d active", active);
+    int active = 0, more = f.fleetMore;
+    for (uint8_t i = 0; i < n; i++) active += f.fleet[i].count;
+    for (uint8_t i = n; i < f.fleetCount; i++) more += f.fleet[i].count;
+    if (more > 0) snprintf(summary, sizeof(summary), "%d active  +%d more", active, more);
+    else          snprintf(summary, sizeof(summary), "%d active", active);
     bottom(summary, C_INK_DIM);
   }
 

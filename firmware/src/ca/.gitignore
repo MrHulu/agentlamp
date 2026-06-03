@@ -1,0 +1,6 @@
+# Raw downloaded roots are reproducible intermediates of fetch_ca_bundle.sh — not tracked.
+# The *.pem.inc files (the C raw-string literals the build links) ARE tracked: they are the
+# pinned-trust artifact, fingerprint-verified at generation time and re-verifiable via
+# `fetch_ca_bundle.sh --check`.
+*.pem
+!*.pem.inc

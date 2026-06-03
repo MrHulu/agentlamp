@@ -8,15 +8,18 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiMulti.h>     // multi-network: auto-join whichever stored SSID is in range (strongest)
 #include <HTTPClient.h>
+#include <ESPmDNS.h>       // resolve the frame server's <host>.local -> current IP (DHCP-drift proof)
 
-#include "config.h"        // FRAME_BASE_URL default / DEVICE_ID / DEVICE_TOKEN (no secrets)
+#include "config.h"        // FRAME_BASE_URL default / DEVICE_ID / DEVICE_TOKEN / RELAY_MODE (no secrets)
 #include "provisioning.h"  // runtime SoftAP captive portal + NVS creds (Preferences "agentlamp")
 #include "theme.h"
 #include "frame.h"
 #include "display.h"
 #include "renderer.h"
 #include "led.h"
+#include "relay.h"         // relay-mode HTTPS transport (WiFiClientSecure + pinned CA + NTP)
 
 #ifndef FIRMWARE_VERSION
 #define FIRMWARE_VERSION "v0.1"
@@ -34,6 +37,11 @@ static constexpr uint8_t       FAIL_BEFORE_OFFLINE = 3;   // 3 fails -> Offline
 static constexpr uint8_t       FAIL_BEFORE_REBOOT  = 75;  // ~5 min of transport failure -> self-heal reboot
 static constexpr unsigned long WIFI_JOIN_TIMEOUT_MS = 12000;
 static constexpr int           WIFI_JOIN_ATTEMPTS   = 5;     // retry known-good NVS creds before the portal
+static constexpr uint32_t      MDNS_QUERY_TIMEOUT_MS = 1500; // per mDNS host lookup (boot + on-failure re-resolve)
+// USB transport: when the Mac pushes frames over the USB-CDC cable (usb_bridge), prefer it and
+// let WiFi go dormant — a USB-tethered lamp then needs NO WiFi and works on any network the
+// laptop is on. WiFi polling resumes only if USB frames stop arriving for this long.
+static constexpr unsigned long USB_FRESH_MS = 12000;
 
 // ---- BOOT-button re-provisioning ----
 // GPIO0 is the onboard BOOT button (INPUT_PULLUP; pressed = LOW). Holding it
@@ -46,15 +54,19 @@ static AgentLampDisplay gfx;
 static Renderer         render(gfx);
 static StatusLed        led;
 static Provisioning     prov;
+static WiFiMulti        wifiMulti;   // fed from NVS multi-net store; joins the strongest known SSID
+static RelayClient      relay;       // relay-mode HTTPS transport (only used when base url is https://)
 
 // ---- state ----
 static Frame         cached;                 // last valid frame
 static bool          haveCached = false;
 static unsigned long lastFetchOkMs = 0;      // millis() of last good fetch
 static unsigned long lastPollMs = 0;
+static unsigned long lastUsbFrameMs = 0;     // millis() of last valid frame read over USB
 static uint8_t       consecutiveFails = 0;
 static unsigned long pollIntervalMs = POLL_INTERVAL_MS;
 static bool          pairingRequired = false; // 401/403/404 -> stop polling
+static int           lastRelayBlock = 0;       // 0 none / -10 CA invalid / -11 clock unsynced (relay fail-closed)
 static Scene         shownScene = Scene::UNKNOWN;
 static unsigned long shownSeq = (unsigned long)-1;
 static bool          provisioningHalt = false; // portal active: hold the SETUP scene
@@ -75,20 +87,81 @@ static void ledForAccent(Accent a) {
   led.setColor(c.r, c.g, c.b);
 }
 
-// ----- WiFi -----
-// True once NVS holds a non-empty SSID. Drives whether we even try to join.
+// ----- WiFi (multi-network) -----
+// True once NVS holds at least one stored network. Drives whether we even try to join.
 static bool haveWifiCreds() { return creds.hasWifi; }
 
-// Attempt to join using the NVS creds. Returns true on connect within timeout.
+// ----- relay provisioning gate (RELAY_MODE only) -----
+// A RELAY_MODE image has NO compiled base URL or token (config.h: both empty in relay mode, I3);
+// they come from NVS provisioning. config.h promises an un-provisioned relay orb shows the
+// SETUP/pairing scene — but an empty FRAME_BASE_URL would otherwise fall into fetchFrame()'s
+// local-HTTP branch (scheme != "https://") and dial a HOSTLESS URL ("http:///api/v1/...") →
+// transport fail → OFFLINE, contradicting the contract. This predicate gates that: a relay
+// build is "provisioned" only once BOTH the https relay base AND the device token are present.
+// (Local mode is always considered provisioned — it ships a working compiled default.)
+static bool relayUnprovisioned() {
+#if defined(RELAY_MODE) && RELAY_MODE
+  bool hasHttpsBase = (strncmp(frameBaseUrl, "https://", 8) == 0);
+  bool hasToken     = (creds.token[0] != '\0');
+  return !(hasHttpsBase && hasToken);
+#else
+  return false;   // local mode: compiled http base + dev token = always provisioned
+#endif
+}
+
+// (Re)load all stored networks from `creds` into the WiFiMulti list. WiFiMulti scans on run()
+// and joins the STRONGEST network whose SSID it knows — so the orb auto-follows the owner
+// across home / office / phone-hotspot without re-provisioning, as long as each was added once.
+static void loadWifiNetworks() {
+  WiFi.mode(WIFI_STA);
+  for (uint8_t i = 0; i < creds.netCount; i++) {
+    if (creds.nets[i].ssid[0]) {
+      wifiMulti.addAP(creds.nets[i].ssid, creds.nets[i].pass);
+      Serial.printf("wifi           : known net [%u] %s\n", (unsigned)i, creds.nets[i].ssid);
+    }
+  }
+}
+
+// Attempt to join the strongest known network within the timeout. Returns true on connect.
 static bool wifiConnect() {
   if (!haveWifiCreds()) return false;
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(creds.ssid, creds.pass);
+  // WiFiMulti.run(timeout) scans + joins the strongest known AP; loop in case the first scan
+  // misses an AP that is briefly absent (matches the single-net retry behaviour we replaced).
   unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - t0) < WIFI_JOIN_TIMEOUT_MS) {
+  while ((millis() - t0) < WIFI_JOIN_TIMEOUT_MS) {
+    if (wifiMulti.run(WIFI_JOIN_TIMEOUT_MS) == WL_CONNECTED) return true;
+    if (WiFi.status() == WL_CONNECTED) return true;
     delay(200);
   }
   return WiFi.status() == WL_CONNECTED;
+}
+
+// ----- mDNS server discovery -----
+// Resolve the frame server's CURRENT IP from FRAME_MDNS_HOST (<host>.local). macOS/Bonjour
+// keeps that name mapped to the host's live DHCP IP, so this auto-follows IP changes — the
+// fix for "unplugged / rebooted / DHCP renewed -> orb stuck offline on a stale IP". On
+// success frameBaseUrl is (re)pointed at the resolved IP; on failure frameBaseUrl is left
+// as-is (the NVS / compiled FRAME_BASE_URL fallback). Requires WiFi connected.
+static bool mdnsStarted = false;
+
+static bool resolveServerViaMdns() {
+  if (FRAME_MDNS_HOST[0] == '\0') return false;          // mDNS disabled (always so in relay mode)
+  if (strncmp(frameBaseUrl, "https://", 8) == 0) return false;  // relay mode: fixed https url, never mDNS-rewritten
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (!mdnsStarted) {
+    if (!MDNS.begin("agentlamp-orb")) return false;      // also advertises the orb itself
+    mdnsStarted = true;
+  }
+  IPAddress ip = MDNS.queryHost(FRAME_MDNS_HOST, MDNS_QUERY_TIMEOUT_MS);
+  if ((uint32_t)ip == 0) return false;                   // not found this round
+  char url[96];
+  snprintf(url, sizeof(url), "http://%u.%u.%u.%u:%u",
+           ip[0], ip[1], ip[2], ip[3], (unsigned)FRAME_SERVER_PORT);
+  if (strcmp(url, frameBaseUrl) != 0) {
+    strlcpy(frameBaseUrl, url, sizeof(frameBaseUrl));
+    Serial.print(F("mdns           : server -> ")); Serial.println(frameBaseUrl);
+  }
+  return true;
 }
 
 // ----- captive-portal provisioning -----
@@ -97,8 +170,12 @@ static bool wifiConnect() {
 static void enterPortal(const char* title, const char* footerLine) {
   Serial.println(F("provisioning   : starting SoftAP captive portal"));
   prov.beginPortal(frameBaseUrl);
+  // Show the LIVE per-device SSID ("AgentLamp-Setup-<suffix>") so the runbook's instruction is
+  // literally correct on screen; beginPortal() has already computed it.
+  char joinLine[40];
+  snprintf(joinLine, sizeof(joinLine), "join %s", prov.activeApSsid());
   render.wifiConfig(title, "SETUP",
-                    "join " AP_SSID,
+                    joinLine,
                     footerLine ? footerLine : "browse " AP_PORTAL_IP);
   ledForAccent(Accent::CYAN);
   provisioningHalt = true;
@@ -121,11 +198,32 @@ static void checkReprovisionButton() {
   }
 }
 
-// ----- HTTP fetch -----
-// Returns: 0 = ok (frame filled), >0 = HTTP status (error), -1 = transport fail.
+// ----- frame fetch -----
+// Returns: 0 = ok (frame filled), >0 = HTTP status (error), <0 = transport/local
+// (-1 transport, -2 oversize, -3 bad json, RELAY_ERR_NO_CA/-10, RELAY_ERR_NO_TIME/-11).
+//
+// Transport selection is by the BASE URL SCHEME, set from NVS provisioning (I3): an https://
+// base routes through the verified relay transport (WiFiClientSecure + pinned CA + NTP-before-
+// TLS); an http:// base uses plain HTTP over the LAN with mDNS IP auto-follow (local mode).
+// The relay path FAILS CLOSED — it never downgrades to unverified TLS.
 static int fetchFrame(Frame& out) {
   if (WiFi.status() != WL_CONNECTED) return -1;
 
+#if defined(RELAY_MODE) && RELAY_MODE
+  // RELAY_MODE backstop: a relay image must NEVER dial a non-https / hostless URL. If we ever
+  // reach here un-provisioned (empty base or non-https), refuse the fetch as a transport failure
+  // rather than constructing "http:///api/v1/..." and timing out into OFFLINE. The setup()/loop()
+  // gates normally keep us in the SETUP portal before this point; this is the last-line guard.
+  if (strncmp(frameBaseUrl, "https://", 8) != 0) return -1;
+#endif
+
+  // Relay mode: https base url -> verified TLS transport (relay.h owns NTP + pinned CA bundle).
+  if (strncmp(frameBaseUrl, "https://", 8) == 0) {
+    relay.configure(frameBaseUrl, DEVICE_ID, creds.token);
+    return relay.fetchFrame(out, pollIntervalMs, POLL_INTERVAL_MS);
+  }
+
+  // Local mode: plain HTTP over the LAN.
   HTTPClient http;
   http.setTimeout(HTTP_TIMEOUT_MS);
   http.setConnectTimeout(HTTP_TIMEOUT_MS);
@@ -133,17 +231,9 @@ static int fetchFrame(Frame& out) {
   char url[160];
   snprintf(url, sizeof(url), "%s/api/v1/device/%s/frame", frameBaseUrl, DEVICE_ID);
 
-  // Relay-mode TLS guard: an https:// base URL passed to http.begin(url) (the
-  // single-arg form) would fall into UNVERIFIED TLS on Arduino-ESP32 2.0.x — the
-  // contract (firmware_contract.md §TLS) forbids unverified relay TLS. Until
-  // WiFiClientSecure + setCACert(pinned root) lands, reject https:// outright so
-  // we never silently talk plaintext-trust to a relay. v1 is local-mode http://.
-  if (strncmp(url, "https://", 8) == 0) {
-    Serial.println(F("frame err      : https relay needs pinned CA (unimplemented) -> refusing"));
-    return -1;
-  }
   if (!http.begin(url)) return -1;
 
+  // Local-mode token: the compiled local default (relay tokens are NVS-only, used above).
   http.addHeader("Authorization", "Bearer " DEVICE_TOKEN);
   http.addHeader("Accept", "application/json");
   http.addHeader("X-Frame-Schema-Version", "1");
@@ -206,9 +296,63 @@ static int fetchFrame(Frame& out) {
   return 0;
 }
 
+// ----- USB-CDC frame transport -----
+// The Mac-side usb_bridge writes one frame JSON per line to the device's serial RX. USB-CDC is
+// full-duplex, so this Mac->device direction is independent of our TX log output. A valid frame
+// is applied exactly like a good fetch — so a USB-tethered lamp needs NO WiFi and works on any
+// network the laptop is on. Returns true iff a frame was applied this call.
+static bool readUsbFrame() {
+  static char line[FRAME_MAX_BYTES + 1];
+  static size_t len = 0;
+  bool applied = false;
+  while (Serial.available() > 0) {
+    int ci = Serial.read();
+    if (ci < 0) break;
+    char c = (char)ci;
+    if (c == '\n' || c == '\r') {
+      if (len > 0) {
+        Frame fresh;
+        if (parseFrame(line, len, fresh)) {
+          unsigned long now = millis();
+          cached = fresh; haveCached = true;
+          lastFetchOkMs = now; lastUsbFrameMs = now;
+          consecutiveFails = 0; pairingRequired = false;
+          Serial.printf("frame ok       : via=usb scene=%d seq=%lu\n", (int)fresh.scene, fresh.seq);
+          applied = true;
+        }
+        len = 0;       // line consumed (or unparseable) — start the next one
+      }
+    } else if (len < FRAME_MAX_BYTES) {
+      line[len++] = c;
+    } else {
+      len = 0;         // overlong line w/o newline: drop + resync, never overflow
+    }
+  }
+  return applied;
+}
+
+// Read USB frames for up to `ms`, returning true as soon as one is applied. Used at boot so a
+// tethered lamp comes straight up on USB without waiting on (or needing) WiFi.
+static bool probeUsbFrame(unsigned long ms) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < ms) {
+    if (readUsbFrame()) return true;
+    delay(10);
+  }
+  return false;
+}
+
+static bool usbFresh(unsigned long now) {
+  return lastUsbFrameMs != 0 && (now - lastUsbFrameMs) < USB_FRESH_MS;
+}
+
 // pick the effective render scene from frame + local staleness/offline state
 static Scene effectiveScene(unsigned long now) {
   if (pairingRequired) return Scene::DIAGNOSTICS;
+  // Relay fail-closed (contract §TLS: TLS-validation / precondition failure -> Diagnostics,
+  // keep cached frame, retry with backoff — NEVER unverified HTTP). Shown only once we've
+  // accumulated a few consecutive fails so a single transient hiccup doesn't flash the banner.
+  if (lastRelayBlock != 0 && consecutiveFails >= FAIL_BEFORE_OFFLINE) return Scene::DIAGNOSTICS;
   if (consecutiveFails >= FAIL_BEFORE_OFFLINE) return Scene::OFFLINE;
   if (!haveCached) return Scene::BOOT;
 
@@ -250,10 +394,20 @@ static void renderCurrent(unsigned long now) {
   shownSeq   = haveCached ? cached.seq : (unsigned long)-1;
 
   switch (sc) {
-    case Scene::DIAGNOSTICS:   // pairing required (401/403/404)
-      render.message("PAIRING", C_ERR, "REQUIRED", "re-pair on laptop",
-                     "agentlamp device pair");
-      led.setColor(C_ERR.r, C_ERR.g, C_ERR.b);
+    case Scene::DIAGNOSTICS:
+      if (pairingRequired) {              // 401/403/404 -> re-pair
+        render.message("PAIRING", C_ERR, "REQUIRED", "re-pair on laptop",
+                       "re-enroll device token");
+        led.setColor(C_ERR.r, C_ERR.g, C_ERR.b);
+      } else if (lastRelayBlock == RELAY_ERR_NO_TIME) {  // clock not synced -> can't verify cert
+        render.message("SECURE", C_WAIT, "syncing clock", "no NTP yet",
+                       "TLS needs the time");
+        led.setColor(C_WAIT.r, C_WAIT.g, C_WAIT.b);
+      } else {                            // RELAY_ERR_NO_CA -> CA bundle missing/invalid
+        render.message("SECURE", C_ERR, "cert pin failed", "refreshing CA",
+                       "won't use insecure tls");
+        led.setColor(C_ERR.r, C_ERR.g, C_ERR.b);
+      }
       break;
 
     case Scene::OFFLINE:
@@ -308,6 +462,10 @@ static void renderCurrent(unsigned long now) {
 }
 
 void setup() {
+  // Enlarge the USB-CDC RX FIFO BEFORE begin(): a frame line is ~0.5 KB, but the default RX
+  // buffer is only 256 B, so a frame pushed by usb_bridge would be truncated before a full
+  // '\n'-line ever forms — readUsbFrame would never see a parseable frame. Must precede begin().
+  Serial.setRxBufferSize(FRAME_MAX_BYTES + 256);
   Serial.begin(115200);
   uint32_t t0 = millis();
   while (!Serial && (millis() - t0) < 2000) delay(10);
@@ -318,12 +476,16 @@ void setup() {
   // compile-time FRAME_BASE_URL default when NVS has none.
   creds = Provisioning::loadCreds();
   strlcpy(frameBaseUrl, creds.server, sizeof(frameBaseUrl));
+  loadWifiNetworks();   // feed all stored SSIDs into WiFiMulti (joins the strongest in range)
 
   Serial.println();
   Serial.println(F("=== AgentLamp firmware ==="));
   Serial.print(F("device_id      : ")); Serial.println(DEVICE_ID);
   Serial.print(F("frame_base_url : ")); Serial.println(frameBaseUrl);
-  Serial.print(F("wifi creds     : ")); Serial.println(haveWifiCreds() ? F("present (NVS)") : F("none -> portal"));
+  Serial.print(F("transport      : ")); Serial.println(
+      strncmp(frameBaseUrl, "https://", 8) == 0 ? F("relay (HTTPS, pinned CA)") : F("local (HTTP/LAN)"));
+  Serial.print(F("wifi nets      : ")); Serial.print(creds.netCount);
+  Serial.println(haveWifiCreds() ? F(" stored (NVS)") : F(" none -> portal"));
 #if defined(BOARD_HAS_PSRAM)
   Serial.print(F("PSRAM size     : ")); Serial.println(ESP.getPsramSize());
 #else
@@ -340,11 +502,30 @@ void setup() {
   render.boot(FIRMWARE_VERSION);
   led.setColor(C_STALE.r / 4, C_STALE.g / 4, C_STALE.b / 4);  // dim boot glow
 
+  // USB-FIRST: if the Mac is already pushing frames down the cable (usb_bridge), use that and
+  // skip WiFi entirely — a USB-tethered lamp then needs no network config and works on whatever
+  // network the laptop is on (or none). WiFi stays as the fallback if USB frames stop.
+  if (probeUsbFrame(3000)) {
+    Serial.println(F("transport      : USB-CDC (frames over the cable) -> skipping WiFi"));
+    shownScene = Scene::BOOT;
+    lastPollMs = millis() - pollIntervalMs;
+    return;
+  }
+
   // No creds in NVS -> first-boot provisioning portal.
   if (!haveWifiCreds()) {
     Serial.println(F("wifi           : no NVS creds -> captive portal"));
     enterPortal("connect wifi", "browse " AP_PORTAL_IP);
     return;   // loop() services the portal; reboots/joins once creds arrive
+  }
+
+  // RELAY_MODE provisioning gate: a relay build with no https relay base / no device token in
+  // NVS must open the captive portal (SETUP scene) — NEVER dial a hostless URL into OFFLINE.
+  // This honours config.h's promise that an un-provisioned relay orb shows pairing/SETUP.
+  if (relayUnprovisioned()) {
+    Serial.println(F("relay          : no relay URL/token in NVS -> SETUP (captive portal)"));
+    enterPortal("pair relay", "paste token in portal");
+    return;   // loop() services the portal; the user pastes the relay URL + token
   }
 
   // Have creds -> try to join, WITH RETRIES. The NVS creds are known-good (they
@@ -374,6 +555,10 @@ void setup() {
   Serial.print(F("wifi           : connected, ip=")); Serial.println(WiFi.localIP());
   Serial.print(F("wifi rssi      : ")); Serial.println(WiFi.RSSI());
 
+  // Discover the server's current IP via mDNS (overrides a stale NVS/compiled IP); falls
+  // back silently to frameBaseUrl if mDNS can't resolve this round (re-tried while polling).
+  resolveServerViaMdns();
+
   shownScene = Scene::BOOT;     // force first poll to repaint
   lastPollMs = millis() - pollIntervalMs;   // poll immediately
 }
@@ -387,21 +572,41 @@ void loop() {
   // DNS + HTTP so the form is reachable; effectiveScene() must NOT repaint over
   // the "join AgentLamp-Setup / 192.168.4.1" instructions the user needs.
   if (provisioningHalt) {
+    // If the Mac starts pushing frames over USB while we're parked in the WiFi portal, leave
+    // the portal and switch to the USB transport — no WiFi setup needed for a tethered lamp.
+    if (readUsbFrame()) {
+      Serial.println(F("transport      : USB-CDC frame arrived -> leaving portal, using USB"));
+      prov.endPortal();
+      provisioningHalt = false;
+      shownScene = Scene::BOOT;
+      renderCurrent(millis());
+      return;
+    }
     bool saved = prov.service();   // pumps dns.processNextRequest() + server.handleClient()
     if (saved) {
       // User POSTed creds -> reload from NVS, tear down portal, try to join.
       Serial.println(F("provisioning   : creds received -> attempting join"));
       creds = Provisioning::loadCreds();
       strlcpy(frameBaseUrl, creds.server, sizeof(frameBaseUrl));
+      loadWifiNetworks();   // the portal ADDED a network -> re-feed WiFiMulti with the full list
       // brief "connecting" repaint so the LCD isn't stuck on SETUP during join
       render.wifiConfig("connecting", "JOIN", creds.ssid, "please wait");
       delay(400);                  // let the HTTP 200 flush to the phone
       prov.endPortal();
       if (wifiConnect()) {
         Serial.print(F("wifi           : connected, ip=")); Serial.println(WiFi.localIP());
-        provisioningHalt = false;
-        shownScene = Scene::BOOT;
-        lastPollMs = millis() - pollIntervalMs;
+        // Relay gate again: WiFi joined but if this relay build still has no https base / token
+        // (user added WiFi but skipped the relay token), stay in SETUP — never dial a hostless
+        // URL. Re-raise the portal so the relay token field is reachable.
+        if (relayUnprovisioned()) {
+          Serial.println(F("relay          : joined WiFi but no relay URL/token -> SETUP again"));
+          enterPortal("pair relay", "paste token in portal");
+        } else {
+          resolveServerViaMdns();   // re-point at the server's current IP after a (re)join
+          provisioningHalt = false;
+          shownScene = Scene::BOOT;
+          lastPollMs = millis() - pollIntervalMs;
+        }
       } else {
         // join failed with the new creds: relaunch the portal to re-enter.
         Serial.println(F("wifi           : JOIN FAILED with new creds -> portal again"));
@@ -412,8 +617,14 @@ void loop() {
     return;
   }
 
-  // If we lost WiFi mid-run (have creds), idle — try a light reconnect.
-  if (WiFi.status() != WL_CONNECTED && haveWifiCreds()) {
+  // USB transport: read any frame the Mac pushed down the cable. When USB is feeding, it is
+  // the live source and WiFi goes dormant (no join attempts, no offline, no self-heal reboot).
+  readUsbFrame();
+  unsigned long now = millis();
+  bool usb = usbFresh(now);
+
+  // If we lost WiFi mid-run (have creds) AND USB isn't feeding, try a light reconnect.
+  if (!usb && WiFi.status() != WL_CONNECTED && haveWifiCreds()) {
     static unsigned long lastReconnect = 0;
     if (millis() - lastReconnect > 10000) {
       lastReconnect = millis();
@@ -421,9 +632,7 @@ void loop() {
     }
   }
 
-  unsigned long now = millis();
-
-  if (!pairingRequired && (now - lastPollMs) >= pollIntervalMs &&
+  if (!usb && !pairingRequired && (now - lastPollMs) >= pollIntervalMs &&
       WiFi.status() == WL_CONNECTED) {
     lastPollMs = now;
 
@@ -436,6 +645,7 @@ void loop() {
       haveCached = true;
       lastFetchOkMs = now;
       consecutiveFails = 0;
+      lastRelayBlock = 0;                  // clear any relay fail-closed banner
       pollIntervalMs = POLL_INTERVAL_MS;   // reset any 429 backoff
       Serial.printf("frame ok       : scene=%d seq=%lu ttl=%lu\n",
                     (int)cached.scene, cached.seq, cached.ttl);
@@ -444,11 +654,33 @@ void loop() {
       pairingRequired = true;
       Serial.printf("frame err      : http %d -> PAIRING REQUIRED\n", r);
     } else {
-      // transport / oversized / bad-json / 429 / 503: keep cache, count failures.
+      // transport / oversized / bad-json / 429 / 503 / relay-fail-closed: keep cache, count fails.
       // Clamp so the uint8_t never wraps 255->0 (~17 min of continuous failure)
       // and momentarily drops out of the Offline state.
       if (consecutiveFails < 255) consecutiveFails++;
       Serial.printf("frame fail     : code=%d fails=%u\n", r, consecutiveFails);
+
+      // Track the relay fail-closed precondition so the UI can show WHY (CA missing / clock
+      // unsynced) rather than a generic Offline. Cleared on the next good fetch.
+      lastRelayBlock = (r == RELAY_ERR_NO_CA || r == RELAY_ERR_NO_TIME) ? r : 0;
+
+      // Relay TLS recovery (contract §TLS): on the fail-closed CA error, or on a run of relay
+      // transport failures, try to refresh the pinned bundle from /cacerts so a CA rotation
+      // doesn't brick the device. NEVER downgrade to unverified HTTP — refreshCaBundle() itself
+      // verifies the relay with the current trust anchor before storing the new bundle.
+      bool relayMode = strncmp(frameBaseUrl, "https://", 8) == 0;
+      if (relayMode && (r == RELAY_ERR_NO_CA ||
+                        (r <= 0 && consecutiveFails % 5 == 0))) {
+        Serial.println(F("frame fail     : relay -> attempting /cacerts refresh"));
+        relay.refreshCaBundle();
+      }
+
+      // Transport failing (r <= 0) in LOCAL mode: the server's IP may have changed (DHCP renew /
+      // host moved networks). Re-discover via mDNS every few fails so the orb self-heals in
+      // seconds — with no reflash / re-provision. (No-op in relay mode: fixed https url.)
+      if (!relayMode && r <= 0 && (consecutiveFails % 3 == 0)) {
+        resolveServerViaMdns();
+      }
       // Self-heal a wedged network stack: only on TRANSPORT errors (r <= 0) — an
       // HTTP-status error (e.g. 500) is the server's problem and a reboot can't fix
       // it. A reboot reliably clears a stuck WiFi/LWIP stack that reconnect cannot.
