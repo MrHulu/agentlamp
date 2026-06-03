@@ -9,6 +9,15 @@
 
 ## Device Pairing
 
+> **What is implemented where.** The pairing-**code** exchange flow below is implemented in
+> **local mode** (`server/agentlamp_server/app.py`: `POST /admin/device/{id}/code` issues the
+> code, `POST /api/v1/device/{id}/pair` burns it for the token). The **relay** Worker does
+> **not** implement `/pair` — on the relay a device token is installed directly as the
+> `AGENTLAMP_DEVICE_TOKENS` secret (`wrangler secret put`, see `../cloud/deploy.md` §3) or at
+> runtime via the admin route `POST /admin/devices/{device_id}/enroll` (`src/cloud/src/index.ts`),
+> and the device pastes that token into its provisioning portal. Step 1's "dashboard" is
+> aspirational (the relay has no HTML admin UI — see `../cloud/cloud_contract.md` → API Surface).
+
 MVP flow — the **one-time pairing code is exchanged for the token** (the long-lived token
 is never shown in a URL or QR, only the short code is):
 
@@ -30,8 +39,11 @@ Server stores only a **hash** of the device token, never the token itself.
 In local mode the **local frame server** plays the role the cloud plays in relay mode for
 pairing and device auth — there is no internet-exposed admin:
 
-- A minimal local CLI (`agentlamp device add` / `agentlamp device pair`, bound to
-  localhost/LAN) creates the device record and issues the one-time pairing code.
+- The local frame server's admin route `POST /admin/device/{device_id}/code` (localhost/LAN
+  only) issues the one-time pairing code for a `device_id`+`device_token`. (There is **no**
+  `agentlamp device add` / `agentlamp device pair` subcommand — the `agentlamp` CLI is
+  collector control only: enroll / revoke / status / doctor. Pairing is server routes, not a
+  CLI verb.)
 - The local frame server serves `POST /api/v1/device/{device_id}/pair` (token exchange) and
   verifies the `Authorization: Bearer <device_token>` on every frame request.
 - Device tokens are stored as hashes in the collector's local store; the same revoke/rotate

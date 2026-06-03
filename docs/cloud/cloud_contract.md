@@ -23,15 +23,50 @@
 
 ## API Surface
 
-| Endpoint | Purpose |
-|----------|---------|
-| `POST /api/v1/collectors/{collector_id}/events` | Signed sanitized ingest (relay only) |
-| `POST /api/v1/device/{device_id}/pair` | Exchange one-time pairing code for read-only token (both modes) |
-| `GET /api/v1/device/{device_id}/frame` | Read-only frame pull |
-| `GET /api/v1/device/{device_id}/cacerts` | Authenticated CA-bundle for device TLS pin refresh (relay; see firmware contract) |
-| `POST /api/v1/device/{device_id}/heartbeat` | Optional device health |
-| `/admin` | Dashboard |
-| `/preview` | 172x320 simulator |
+The **Status** column is ground-truth as of the relay build (`src/cloud/src/index.ts`): the
+Cloudflare Worker implements ONLY `events`, `frame`, `cacerts`, the `/admin` enroll+revoke
+routes, and `/healthz`. Rows marked *local-mode-only* are served by the Python frame server
+(`server/agentlamp_server/app.py`), not the relay Worker. Rows marked *aspirational* are in
+neither and are tracked future work — do not curl them against a deployed relay.
+
+| Endpoint | Purpose | Status |
+|----------|---------|--------|
+| `POST /api/v1/collectors/{collector_id}/events` | Signed sanitized ingest (relay only) | relay-implemented (`index.ts` → RelayDO) |
+| `GET /api/v1/device/{device_id}/frame` | Read-only frame pull | relay-implemented + local-mode |
+| `GET /api/v1/device/{device_id}/cacerts` | Authenticated CA-bundle for device TLS pin refresh (see firmware contract) | relay-implemented |
+| `GET /healthz` | Liveness (no secret, no state) | relay-implemented + local-mode |
+| `POST /admin/collectors/{kid}/revoke` | Revoke a collector kid (strongly-consistent, I4) | relay-implemented (admin-bearer gated) |
+| `POST /admin/collectors/{kid}/enroll` | Runtime-enroll a collector kid (I5; body `{secret}`) | relay-implemented (admin-bearer gated) |
+| `POST /admin/devices/{device_id}/revoke` | Revoke a device token (strongly-consistent, I4) | relay-implemented (admin-bearer gated) |
+| `POST /admin/devices/{device_id}/enroll` | Runtime-enroll a device token (I5; body `{token}`) | relay-implemented (admin-bearer gated) |
+| `POST /api/v1/device/{device_id}/pair` | Exchange one-time pairing code for read-only token | **local-mode-only** (`app.py`; relay enrolls device tokens via `/admin/devices/{id}/enroll`) |
+| `POST /admin/event` · `POST /admin/quota` · `POST /admin/heartbeat` · `POST /admin/reset` · `POST /admin/device/{id}/code` | Local manual event / quota / pairing-code injection | **local-mode-only** (`app.py`) |
+| `GET /preview` | 172x320 browser simulator | **local-mode-only** (`app.py`) |
+| `POST /api/v1/device/{device_id}/heartbeat` | Optional device health | **aspirational** (not in the Worker or the local server) |
+| `/admin` dashboard + login (MFA/TOTP) | Web admin UI | **aspirational** (the relay exposes only the `/admin/*` revoke+enroll JSON routes above; no HTML dashboard/login is implemented — admin gating is the in-Worker bearer + optional Cloudflare Access) |
+
+### `GET /api/v1/device/{device_id}/cacerts` — pinned CA bundle refresh
+
+Cross-piece contract with the firmware (`firmware/src/relay.h::refreshCaBundle`,
+`docs/api/device_frame_api.md`). The device pins a small ROOT CA bundle and refreshes it here so a
+CA rotation never bricks a deployed orb (no reflash).
+
+- **Auth**: bearer device token, **identical to `/frame`** (header-only, hashed at rest). The
+  Durable Object verifies the token and applies revocation immediately (I4): a revoked/unknown
+  device gets `403 device_revoked` / `404 unknown_device` and CANNOT pull a fresh trust anchor.
+  `401 bad_token` on a wrong token. Same precedence table as the frame route.
+- **Response (200)**: `Content-Type: application/x-pem-file`; body is a PEM bundle with one or
+  more `BEGIN/END CERTIFICATE` blocks. The firmware structurally validates it and stores it in
+  NVS where it **wins** over the compiled `ca_bundle.h` fallback. Invalid/non-200 → device keeps
+  its current anchor (fail-closed).
+- **Bundle source precedence (relay)**: `CA_BUNDLE` env var/secret → KV `CONFIG["ca_bundle"]`
+  (non-urgent cache, eventually consistent — I4) → an embedded default in `src/cloud/src/ca.ts`
+  (ISRG Root X1 + DigiCert Global Root G2 + Baltimore CyberTrust Root, the same roots compiled
+  into the firmware fallback). A configured-but-malformed bundle (no BEGIN/END markers) is refused
+  and falls over to the default. **Rotation** = `wrangler secret put CA_BUNDLE` or a KV write; no
+  firmware reflash, no per-device/per-network hardcode (I3).
+- **Rate limit**: shares the device-frame bucket (20/min); the firmware calls it only on repeated
+  TLS handshake failures, not on every poll.
 
 ## Rate Limits
 
@@ -103,6 +138,13 @@ Modifiers:
 - Codex and Claude sessions share one priority queue; provider name is display metadata, not a separate scene.
 
 ## Admin MVP
+
+> **Implementation status:** of this list, only **revoke/enroll of collector and device
+> tokens** is implemented on the relay — as the admin-bearer-gated JSON routes
+> `POST /admin/{collectors,devices}/{id}/{revoke,enroll}` (`src/cloud/src/index.ts`), NOT as
+> an HTML dashboard. Login / a web dashboard / test-frame trigger / simulator view / a
+> rejection-audit UI are **aspirational** — see the API Surface table. (The 172x320 simulator
+> exists, but only in the local-mode Python server's `/preview`.)
 
 - Login.
 - View providers, accounts, sessions, quotas, alerts, collectors, devices.

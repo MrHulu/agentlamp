@@ -15,6 +15,33 @@ X-Frame-Schema-Version: 1
 
 Tokens must not be placed in URLs. The path is versioned (`/api/v1/...`).
 
+## CA Bundle Refresh Endpoint
+
+The device pins a small ROOT CA **bundle** (compiled fallback in `firmware/src/ca/*.pem.inc`).
+So a CA rotation does not require a reflash, the firmware refreshes the bundle over the
+already-trusted TLS connection (`firmware/src/relay.h::refreshCaBundle`):
+
+```http
+GET /api/v1/device/{device_id}/cacerts
+Authorization: Bearer <device_token>
+Accept: application/x-pem-file
+```
+
+- **Auth**: identical to `/frame` — Bearer device token, header-only, hashed at rest. Revocation
+  applies immediately (a revoked/unknown device cannot pull a fresh trust anchor): same
+  `401 bad_token` / `403 device_revoked` / `404 unknown_device` precedence as the frame route.
+- **Success (200)**: body is a PEM bundle (`Content-Type: application/x-pem-file`) containing one
+  or more `-----BEGIN CERTIFICATE----- … -----END CERTIFICATE-----` blocks. The firmware
+  structurally validates it (must contain BEGIN+END markers); a valid bundle is stored in NVS and
+  **wins** over the compiled fallback. A non-200 or structurally invalid body is ignored
+  (fail-closed — the device keeps its current trust anchor, never downgrades to unverified HTTP).
+- **Source / rotation (relay)**: the cloud serves the bundle from `CA_BUNDLE` (var/secret) →
+  KV `CONFIG["ca_bundle"]` → an embedded default (ISRG Root X1 + DigiCert Global Root G2 +
+  Baltimore CyberTrust Root — the same roots compiled into the firmware fallback). Rotate with
+  `wrangler secret put CA_BUNDLE` or a KV write; no firmware reflash. See `cloud_contract.md`.
+- **When called**: opportunistically, on repeated TLS handshake failures — NOT on every poll. It
+  shares the device rate-limit bucket with `/frame`.
+
 ## Versioning / Schema Evolution
 
 - The device sends `X-Frame-Schema-Version: <max supported>`; the server responds with
@@ -46,10 +73,9 @@ Tokens must not be placed in URLs. The path is versioned (`/api/v1/...`).
     "task": "waiting"
   },
   "fleet": [
-    {"provider": "Codex", "count": 3, "status": "CODING"},
-    {"provider": "Claude", "count": 1, "status": "WAITING"}
+    {"provider": "ai-center", "count": 3, "status": "CODING"},
+    {"provider": "channel-bridge", "count": 1, "status": "WAITING"}
   ],
-  "fleet_more": 0,
   "quota": [
     {
       "provider": "Codex",
@@ -67,10 +93,15 @@ Tokens must not be placed in URLs. The path is versioned (`/api/v1/...`).
 }
 ```
 
-- `fleet_more` (optional, integer): the count of fleet rows truncated beyond the
-  6-entry `fleet` cap (and any rows dropped by the 2 KB byte-cap trim). **Present
-  only when the count is > 0**; absent otherwise. The device may ignore it (it is
-  backward-compatible per the unknown-field rule) or render a "+N more" hint.
+- A `fleet` row groups by **project**: `provider` carries the project display label
+  (a clean string — NO baked `xN` suffix); `count` is the number of **active** agents
+  in that project (working right now — not idle/done/stale/offline); `status` is the
+  highest-priority status among that project's active agents. A project with zero active
+  agents is omitted. The device renders the count as a separate badge.
+- `fleet_more` (optional, integer): the number of **additional active agents** in
+  projects dropped beyond the 5-row `fleet` cap (and any rows dropped by the 2 KB
+  byte-cap trim). **Present only when > 0**; absent otherwise. The device may ignore it
+  (backward-compatible per the unknown-field rule) or render a "+N more" hint.
 - A `quota` entry carries **both** `w5` and `week` for one `(provider, account)`
   when both windows are known; a window with no data is **omitted** (never `null`).
 
@@ -106,10 +137,12 @@ Tokens must not be placed in URLs. The path is versioned (`/api/v1/...`).
 > This is the authoritative `status` set. Priority scores in `../cloud/cloud_contract.md`
 > MUST be a subset of it (no `RUNNING`).
 
-`provider` (in `primary`/`fleet`) is a **Title-case display label** (`"Codex"`, `"Claude"`)
-derived from the lowercase wire enum (`codex`/`claude`/`manual`); the frame generator does the
-mapping. Firmware treats it as an opaque display string. All other identity fields (`account`,
-`project`) carry the lowercase sanitized alias verbatim.
+`provider` in `primary` is a **Title-case display label** (`"Codex"`, `"Claude"`) derived
+from the lowercase wire enum (`codex`/`claude`/`manual`); the frame generator does the mapping.
+In a `fleet` row the same field name instead carries the **project display label** (rows group
+by project, since an owner running many agents cares about "which project, how many busy"); it
+is a clean sanitized alias with no count suffix. Firmware treats both as opaque display strings.
+Other identity fields (`account`, `project`) carry the lowercase sanitized alias verbatim.
 
 `accent`:
 
@@ -133,7 +166,8 @@ mapping. Firmware treats it as an opaque display string. All other identity fiel
 
 ## Array Caps (protect the 2 KB budget)
 
-- `fleet`: max **6** entries (server truncates lowest priority; overflow implied by a
+- `fleet`: max **5** entries — the device renders 5 rows, so the wire cap equals the
+  render cap (server truncates lowest priority; overflow implied by a
   `fleet_more` count if needed).
 - `quota`: max **2** entries (top-2 risk).
 

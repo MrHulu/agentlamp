@@ -35,6 +35,14 @@ not copy its config.) Confirmed by cross-checking three independent sources belo
 
 ## 2. Pin map + panel config — where the numbers came from
 
+> 🚨 **SUPERSEDED 2026-05-30 (see [devlog 05 §1](05-hardware-bringup.md)).** The backlight
+> conclusion in this section — "BL = **48**, the scaffold's 46 is wrong" — is **INVERTED** and
+> must NOT be followed as live guidance. The on-hardware pin sweep in devlog 05 (per-pin cycle,
+> screen lit showing "PIN 46") proved **GPIO46** is the backlight on this -1.47**B** board and
+> GPIO48 leaves the screen dark. The same-family docs cited below (espp BSP / TFT_eSPI #3527)
+> describe a different variant. The firmware was corrected to `PIN_LCD_BL=46`. The original text
+> is kept below verbatim for history; the live truth is **46**.
+
 Per the golden rule (search before build), I did not invent any pin/offset. I pulled the
 panel config from a **proven working LovyanGFX repo** and cross-checked the pin map against
 the **espp board-support package** and **TFT_eSPI** community configs:
@@ -328,6 +336,15 @@ the end.
 ### P0 — verified FALSE POSITIVE (docs corrected, firmware unchanged)
 
 **P0-2 · backlight pin: firmware BL=48 vs docs BL=46** (`platformio.ini:36`, `display.h:75` vs `docs/BUILD.md`, `firmware_contract.md`)
+
+> 🚨 **SUPERSEDED 2026-05-30 (see [devlog 05 §1](05-hardware-bringup.md)).** This bench-only
+> conclusion — "firmware is correct at 48; GPIO46 = dark screen; do NOT change the firmware;
+> Codex's flag is a FALSE POSITIVE" — was **wrong and is INVERTED**. The on-hardware sweep in
+> devlog 05 proved the opposite: **GPIO46 lights the board, GPIO48 is dark**, and the firmware
+> was changed to `cfg.pin_bl = 46` / `PIN_LCD_BL=46`. The "stale docs corrected to 48" action
+> below was itself reverted. Codex's original flag was **correct**. Do NOT act on the text
+> below — it is kept verbatim for history; the live truth is **46**.
+
 - **Verified: FIRMWARE IS CORRECT at 48.** `display.h:75` (`cfg.pin_bl = 48`),
   `platformio.ini:36` (`-D PIN_LCD_BL=48`), and devlog §2 all agree on GPIO48, cross-checked
   against the espp BSP + ahmadrezarazian LovyanGFX reference + TFT_eSPI discussion #3527.

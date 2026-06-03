@@ -172,8 +172,15 @@ Request-level failures use HTTP status; per-event failures appear in `results[].
 | `sanitization_failed` | per-event in `results` (HTTP still 200) | event |
 | `unknown_field` | per-event in `results` (HTTP still 200) | event |
 
-## Cloud-Side Invariant
+## Cloud-Side Invariant (I1 — validate-only, never re-sanitize)
 
-Cloud runs a second, independent sanitization gate (identical rules to the collector's,
-including recursive unknown-field rejection) even when the collector claims the event is
-sanitized. See `../security/sanitization_policy.md` → Cloud Requirements.
+The cloud is an independent **validate-only** gate over the *already-sanitized* output — it
+does **NOT** re-run the collector's raw→safe transforms (NFKC / zero-width strip / HMAC
+aliasing / path-secret scrubbing). The Worker / Durable Object only VALIDATES the received
+event: payload-key allowlist + forbidden-key reject + enum membership + neutral-alias shape +
+a forbidden-pattern reject scan (incl. recursive unknown-field rejection). It **rejects,
+never coerces** — a non-canonical value means a buggy/hostile collector and the event is
+dropped. Re-deriving ~800 lines of redaction heuristics in a second (TypeScript) runtime
+risks silent under-redaction, so it is a **NO-GO** for the cloud to accept a raw
+`cwd`/`prompt`/`model`/path and sanitize it. See `../security/sanitization_policy.md` →
+Cloud Requirements and `docs/devlog/16-relay-cloudflare-build-spec.md` → I1.

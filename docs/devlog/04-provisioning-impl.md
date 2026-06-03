@@ -100,7 +100,11 @@ brief — avoids adding `ESPAsyncWebServer`), `DNSServer.h`, `Preferences.h`, `W
   reachable *while* the SETUP scene holds. `delay(5)` keeps DNS/HTTP responsive.
 - **NVS namespace `agentlamp`**, keys: `ssid`, `pass`, `server`. `loadCreds()` falls back to
   the compile-time `FRAME_BASE_URL` when `server` is unset.
-- **AP:** `WiFi.mode(WIFI_AP_STA)` + `WiFi.softAP("AgentLamp-Setup", "agentlamp")`. I chose a
+- **AP:** `WiFi.mode(WIFI_AP_STA)` + `WiFi.softAP(<ssid>, "agentlamp")`, where `<ssid>` is the
+  **per-device** name `AgentLamp-Setup-<suffix>` — `<suffix>` is the last 4 hex digits of this
+  chip's factory MAC (`ESP.getEfuseMac() & 0xFFFF`, `Provisioning::apSsid()`). The suffix lets
+  the user tell two orbs apart during setup and makes the runbook's "join AgentLamp-Setup-<id>"
+  instruction literally correct (the SETUP scene prints the exact live SSID). I chose a
   **fixed WPA2 password `agentlamp`** (≥8 chars, the WPA2 minimum) over an open AP, so the
   setup network isn't trivially joinable by every device that scans for open APs. The AP IP is
   the ESP32 default `192.168.4.1`.

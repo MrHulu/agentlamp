@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentlamp"
+version = "0.1.0"
+description = "AgentLamp — turn local Codex / Claude agent activity into a live desk-orb status, with a default-deny privacy boundary. Ships the `agentlamp` collector control CLI (enroll / revoke / status / doctor)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+# The collector CLI (enroll / revoke / status / doctor) and the sanitizer are STDLIB-ONLY by
+# design — installing the package gives you a working `agentlamp` CLI with zero third-party deps.
+# Heavier pieces are opt-in extras so a bare `pip install -e .` stays minimal:
+#   - `keyring` (OS keychain backend for the collector secret) is OPTIONAL; secretstore.py falls
+#     back to a 0600 file when it is absent.
+#   - the local frame server (`python -m agentlamp_server`) needs fastapi + uvicorn — install
+#     the `[server]` extra (`pip install -e ".[server]"`) to get them.
+dependencies = []
+
+[project.optional-dependencies]
+keyring = ["keyring>=24"]
+server = ["fastapi>=0.110", "uvicorn>=0.27"]
+all = ["keyring>=24", "fastapi>=0.110", "uvicorn>=0.27"]
+
+# `agentlamp` resolves to collector.cli:main once the package is installed. The zero-install
+# canonical form is `cd src && python -m collector.cli ...` (see docs/runbook/switch-fast.md);
+# this console-script is the post-install alias.
+[project.scripts]
+agentlamp = "collector.cli:main"
+
+# Two package roots in this repo (NOT a uniform src/ layout):
+#   - `collector`       lives under  src/      (the CLI + daemon + hooks)
+#   - `agentlamp_server` lives under server/   (the sanitizer + validate-only gate + frame server)
+# collector.config bridges server/ onto sys.path at runtime too, so the CLI works even from the
+# zero-install module form; declaring both here makes an actual install self-contained.
+[tool.setuptools]
+package-dir = { "collector" = "src/collector", "agentlamp_server" = "server/agentlamp_server" }
+
+[tool.setuptools.packages.find]
+where = ["src", "server"]
+include = ["collector*", "agentlamp_server*"]
+namespaces = false

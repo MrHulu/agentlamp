@@ -116,9 +116,11 @@ Use official board docs for final pins. Current known pins:
 - LCD CS GPIO42.
 - LCD DC GPIO41.
 - LCD RST GPIO39.
-- LCD backlight GPIO48. (The earlier GPIO46 here was stale — the authoritative espp
-  BSP, the ahmadrezarazian LovyanGFX reference, and the Waveshare wiki all give GPIO48;
-  GPIO46 would leave the backlight off and the screen dark. Firmware uses 48.)
+- LCD backlight GPIO46. (EMPIRICALLY CONFIRMED on the real -1.47B hardware by a pin sweep
+  2026-05-30: driving GPIO46 lights the panel; driving GPIO48 leaves the screen DARK. The
+  espp BSP, the ahmadrezarazian LovyanGFX reference, and the generic Waveshare wiki give 48,
+  but those describe the non-B variant — this **-1.47B** board uses 46. Firmware uses 46
+  (platformio.ini `-D PIN_LCD_BL=46`); this doc is reconciled to the working code.)
 - RGB LED GPIO38.
 
 ## Firmware Acceptance

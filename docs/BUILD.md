@@ -28,27 +28,35 @@ firmware drives (verify against the official Waveshare wiki for your revision):
 | LCD CS | 42 |
 | LCD DC | 41 |
 | LCD RST | 39 |
-| LCD backlight | 48 |
+| LCD backlight | 46 |
 | RGB LED | 38 |
 
 ## Local-mode quickstart (cloud-free)
 
-1. **Install the collector** (Python 3.11+):
+1. **Install the collector + local server** (Python 3.11+):
    ```bash
    git clone <repo-url> && cd agentlamp
    python3 -m venv .venv && . .venv/bin/activate
-   pip install -e ./src/collector            # (package name finalized during implementation)
+   pip install -e ".[server]"                 # `agentlamp` CLI + the local frame server (fastapi/uvicorn)
+   # NOTE: a bare `pip install -e .` is stdlib-only — it gives you the CLI but the local
+   # frame server in step 2 then fails with ModuleNotFoundError (fastapi/uvicorn are the
+   # [server] extra). The collector-control CLI is enroll / revoke / status / doctor only.
    cp .env.example .env                       # then edit — see below
    ```
 2. **Run the local frame server + browser simulator** (no device needed yet):
    ```bash
-   agentlamp serve --local --bind 0.0.0.0:8787
+   python -m agentlamp_server
+   # binds AGENTLAMP_LOCAL_BIND (default 0.0.0.0:8787); override e.g. AGENTLAMP_LOCAL_BIND=0.0.0.0:9000
    # open http://localhost:8787/preview to see the 172x320 simulator
    ```
-3. **Feed it a manual event** to confirm the pipeline:
+3. **Feed it a manual event** to confirm the pipeline. There is no `emit` CLI — POST a
+   shorthand event to the local server's admin route (it runs the full default-deny
+   sanitizer, then recomputes the frame):
    ```bash
-   agentlamp emit --status CODING --project project-a --account main
-   # the simulator should update within a couple seconds
+   curl -fsS -X POST http://localhost:8787/admin/event \
+     -H 'Content-Type: application/json' \
+     -d '{"status":"CODING","project":"project-a","account":"main"}'
+   # the simulator at /preview should update within a couple seconds
    ```
 4. **Flash the firmware** (PlatformIO):
    ```bash
@@ -66,12 +74,14 @@ firmware drives (verify against the official Waveshare wiki for your revision):
 
 ## Relay mode (optional, for remote viewing)
 
-Only if you want to see the orb when it's not on the same LAN as your laptop. You will need a
-small public host (a $5 VPS is enough), a domain, and TLS. Then:
-`agentlamp serve --relay …` on the host, point the collector at it with a signed collector
-key, and re-pair the device with the relay base URL. Everything the relay sees is the
-sanitized metadata listed in `security/threat_model.md`. **Do not host a relay for other
-people** — v1 is single-owner.
+Only if you want to see the orb when it's not on the same LAN as your laptop. The relay is a
+**Cloudflare Worker + Durable Object + KV** (no VPS to run), fronted by a domain Cloudflare
+issues the TLS cert for. The exact owner-gated stand-up (`wrangler login` → `wrangler deploy`
+→ KV/DO/secret setup → DNS) is in `cloud/deploy.md`; once it answers, enroll a machine against
+it with `agentlamp enroll --relay-host https://<your-relay-host> --kid <kid> --secret <s>`
+(see `runbook/switch-fast.md`). The device's relay URL is provisioned once and never changes.
+Everything the relay sees is the sanitized metadata listed in `security/threat_model.md`.
+**Do not host a relay for other people** — v1 is single-owner.
 
 ## Verify before you trust it
 

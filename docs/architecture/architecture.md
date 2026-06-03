@@ -36,20 +36,87 @@ When the device must show state while you are on a different network (orb at hom
 laptop at the office), the collector pushes sanitized summaries to an optional
 public **AgentLamp Cloud** relay, and the device polls the relay instead of the LAN.
 
+> ## 🚨 RELAY INVARIANTS — read before touching any relay code (binding contract)
+>
+> These are lifted verbatim from the build spec
+> (`../devlog/16-relay-cloudflare-build-spec.md` → NON-NEGOTIABLE INVARIANTS). Violating
+> either one is a **NO-GO**, not a code-review nit.
+>
+> - **I1 — The cloud VALIDATES, it NEVER re-sanitizes.** The Python collector is the
+>   *only* place raw → safe heuristic redaction (NFKC, zero-width strip, HMAC aliasing,
+>   path/secret scrubbing) ever happens. The Cloudflare Worker / Durable Object only
+>   **VALIDATES** the already-sanitized output: payload-key **allowlist** +
+>   forbidden-key **reject** + **enum membership** + **neutral-alias shape** +
+>   forbidden-pattern **reject** scan. The cloud must **reject, never coerce**. It is a
+>   NO-GO if the cloud ever accepts a raw `cwd` / `prompt` / `model` / path and tries to
+>   sanitize it in TypeScript. (Rationale lives in
+>   `../security/sanitization_policy.md` → Cloud Requirements.)
+> - **I3 — NO single-machine / single-network hardcodes in any relay path.** The relay
+>   URL, device token, CA roots, collector `kid` / secret, and Cloudflare account / zone
+>   all come from device NVS provisioning or from cloud / collector env + secrets — never
+>   from source. The local-mode hardcodes in `../../firmware/src/config.h`
+>   (`192.168.1.148`, `yangzhenzhous-macbook-air`) MUST NOT compile into a relay build.
+>   The whole point of relay mode is "not tied to one Mac on one network."
+
+The relay is a **Cloudflare-only** deployment: a single **Worker** (HTTP entry +
+HMAC verify + edge rate-limit + uniform auth errors) in front of one **Durable Object**
+(the strongly-consistent state machine) plus a **KV** namespace (non-urgent config only).
+
 ```text
-Local machine
-  collector adapters → sanitizer → signed push client
+Each computer (its own collector + its own kid)
+  collector adapters → sanitizer (Python — the ONLY transform) → HMAC-signed push
         |
-        | HTTPS POST, sanitized event summaries (HMAC-signed)
+        | HTTPS POST  /api/v1/collectors/{kid}/events   (sanitized summaries, HMAC-signed)
         v
-AgentLamp Cloud (relay)
-  collector ingest → auth/replay → event store → aggregation
-  display priority engine → device frame API → admin + simulator
+Cloudflare
+  Worker  — verify HMAC · edge rate-limit · route · uniform 401/403/404
+     └─ RPC ─→ Durable Object "relay"  (singleton; owns ALL revocation-critical state):
+                 nonce / idempotency · device + collector registry + revocation ·
+                 VALIDATE the sanitized event (I1, validate-only) · apply → materialized
+                 state · frame generation · retention-purge + audit via DO alarms
+  KV "CONFIG" — non-urgent config / cache ONLY (never revocation-critical)
         |
-        | HTTPS GET, compact read-only frame JSON
+        | HTTPS GET  /api/v1/device/{device_id}/frame   (compact read-only frame JSON)
         v
-ESP32-S3-LCD-1.47B (same firmware, different base URL)
+ESP32-S3-LCD-1.47B  — same firmware, ONE fixed relay base URL (never changes)
+  Authorization: Bearer <device_token>  ·  pinned ROOT CA bundle + NTP-before-TLS
+  WiFi: multi-network NVS store + captive-portal fallback
 ```
+
+#### Why the Worker + Durable Object + KV split (I4)
+
+The **Durable Object owns all revocation-critical and strongly-consistent state** — the
+nonce set, the idempotency map, the device / collector registry, revocation flags, the
+materialized frame state, and the retention-purge / audit alarms. A revoked `kid` or
+device must stop being accepted **immediately**, so it cannot live in eventually-consistent
+KV. **KV holds only non-urgent config / cache.** The Worker is stateless: it verifies the
+HMAC, applies an edge rate-limit, and forwards to the single DO instance.
+
+#### Switching computer / network is a collector + device-NVS operation, never a redeploy
+
+Because the device polls **one fixed relay URL**, neither switching computer nor switching
+WiFi touches the relay or the device's backend config:
+
+- **Switch computer** → run the collector on the new machine. This is **not** a single
+  magic command: `agentlamp enroll` installs the whole stack (hooks + keyring pepper /
+  aliases + collector secret + relay push — invariant I5), but it **requires you to pass a
+  `kid` + signing `secret`** (`--kid` / `--secret`) — enroll does **not** generate them.
+  You provision that `kid:secret` pair once when you stand up the relay
+  (`wrangler secret put AGENTLAMP_COLLECTOR_KEYS`, see `../cloud/deploy.md` §3), then paste
+  the pair into enroll on each machine; enroll's step 6 registers it with the DO's live
+  registry (no redeploy). The real bring-up sequence is `enroll` → source the written
+  `relay.env` → start the daemon. Revoke = the `/admin/collectors/{kid}/revoke` route
+  removes the `kid` from the DO registry. An un-enrolled machine shows offline / stale,
+  never "magically follows."
+- **Switch WiFi** → the device auto-joins any stored network, else raises a captive portal
+  (AP `AgentLamp-Setup-<suffix>`, password `agentlamp`). The form carries WiFi network /
+  password / Server URL / Device token, but a routine switch changes only the two WiFi
+  fields — the Server URL is pre-filled with the current relay and a blank token keeps the
+  stored one, so the backend URL is unchanged.
+
+Step-by-step copy-paste flows live in `../runbook/switch-fast.md`; the exact owner-gated
+deploy (KV namespace + DO migration + secrets + `wrangler deploy` + DNS) is in
+`../cloud/deploy.md`.
 
 Relay mode is where the entire ingest/HMAC/multi-hop security surface lives. If you
 do not need remote viewing, do not deploy it.
@@ -67,20 +134,33 @@ cross-account separation — because there is exactly one account.
 
 - The relay build MUST NOT expose a public registration flow.
 - Hosting one relay for multiple unrelated people is **explicitly out of scope for v1**
-  and unsafe (see `device_collector_binding` below — it scopes data *within* one owner,
-  it is not a tenant boundary).
+  and unsafe (see Device ↔ Collector Binding below — per-device feed scoping is an
+  *aspirational* future control, not yet implemented; it is in any case not a tenant
+  boundary).
 - Multi-tenant support (`owner_id` on every row + token, per-tenant frame scoping) is a
   documented future extension, not a v1 feature. Until it exists, the README and
   `SECURITY.md` MUST state "one owner per deployment."
 
 ## Device ↔ Collector Binding
 
-A device must not display events from collectors it was not paired with, even within a
-single owner (e.g. a personal collector vs a work collector on two machines).
+> **What v1 actually does (relay mode).** The Durable Object materializes **one
+> owner-wide frame** from every accepted collector's events — there is a single
+> `sessions` / `quota` state (`frame.ts` `buildFrame` / `applySanitizedEvent`), not a
+> per-device slice. The `device_id` is an **auth / identity** value only: `GET
+> /api/v1/device/{device_id}/frame` verifies the device's bearer token (and revocation,
+> I4) and then stamps that `device_id` into the same shared frame. Every authorized
+> device of the one owner sees the same materialized state.
 
-- Each `device` is bound to an explicit set of `collector_id`s (`device_feed`).
-- Frame generation aggregates **only** events from bound collectors.
-- An unbound device renders the Pairing scene, never another collector's data.
+**Aspirational (not yet implemented).** A finer-grained guarantee — a device displays only
+events from collectors it was explicitly paired with, even within a single owner (e.g. a
+personal collector vs a work collector) — is a documented future control:
+
+- each `device` bound to an explicit set of `collector_id`s (a `device_feed`),
+- frame generation filtered to **only** bound collectors,
+- an unbound device rendering the Pairing scene instead of shared data.
+
+None of this per-device feed filtering exists in the v1 relay yet; `buildFrame` does not
+take a feed. Treat the bullets above as the planned shape, not current behavior.
 
 ## Ownership Boundaries
 
@@ -127,7 +207,8 @@ The collector (local mode) and the cloud relay (relay mode) share this materiali
 - `quota_windows`
 - `alerts`
 - `devices`
-- `device_feed`  *(device → bound collector_ids; see Device ↔ Collector Binding)*
+- `device_feed`  *(aspirational: device → bound collector_ids; NOT implemented in the v1
+  relay, which materializes one owner-wide frame — see Device ↔ Collector Binding)*
 - `device_frames`
 - `audit_logs`
 
@@ -151,8 +232,21 @@ trust a missing close event. Explicit timeouts (defaults; tune in collector conf
 | active session → `OFFLINE`/closed | no event for this session | 600 s |
 | all of a collector's sessions → `OFFLINE` | no collector heartbeat | 90 s |
 
-The collector emits `collector.heartbeat` on a fixed interval; the aggregator (local or
-cloud) applies these timeouts so a dead session can never render as active.
+The collector daemon emits `collector.heartbeat` on a fixed interval so an idle-but-present
+owner never decays to offline; the aggregator (local or cloud) applies these timeouts so a
+dead session can never render as active. The transport differs by mode:
+
+- **Local mode** → the daemon POSTs an empty body to `/admin/heartbeat` over loopback
+  (`daemon._heartbeat`).
+- **Relay mode** → the daemon pushes a **signed, payload-less** `collector.heartbeat`
+  ingest event to `/api/v1/collectors/{kid}/events` (`daemon._relay_heartbeat` →
+  `relaypost.push_heartbeat`); the loopback `/admin/heartbeat` does not reach the cloud.
+  The relay short-circuits `event_type == "collector.heartbeat"` **before** the
+  validate-only gate (it carries no payload, so there is nothing to sanitize) and just
+  bumps `last_collector_heartbeat`. Any accepted session event also refreshes that clock,
+  so the explicit heartbeat only fires while the owner is idle. If `now -
+  last_collector_heartbeat > 90 s` while sessions exist, the whole fleet renders offline
+  (`frame.ts` `selectScene`).
 
 ### Retention (closes the unbounded-history side-channel)
 
