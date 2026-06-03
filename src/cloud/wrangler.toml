@@ -1,0 +1,60 @@
+# AgentLamp relay — Cloudflare Worker + Durable Object + KV.
+#
+# 🚨 BUILD-SPEC I3 (docs/devlog/16): NO single-machine / single-network hardcodes.
+#   - account_id / zone_id are intentionally ABSENT here. Provide them at deploy time via
+#       `CLOUDFLARE_ACCOUNT_ID` env (wrangler reads it) or `wrangler deploy --account-id <id>`.
+#     Committing a real account id ties the build to one owner's tenant — forbidden.
+#   - RELAY_HOST below is a PLACEHOLDER. The owner sets the real host with
+#       `wrangler deploy --var RELAY_HOST:relay.example.com`  (or edits a gitignored
+#     wrangler.local.toml). The device's backend URL is provisioned via NVS, not baked here.
+#
+# 🚨 BUILD-SPEC I4: the Durable Object RELAY owns ALL revocation-critical + strongly-consistent
+#   state (nonces, idempotency, registry, revocation, materialized frame, purge/audit alarm).
+#   KV CONFIG is for NON-urgent config/cache ONLY (eventually consistent — never revocation).
+#
+# Secrets (set ONCE per environment via `wrangler secret put`, NEVER committed):
+#   wrangler secret put AGENTLAMP_COLLECTOR_KEYS   # "kid1:secret1,kid2:secret2" — HMAC ingest keys
+#   wrangler secret put AGENTLAMP_DEVICE_TOKENS    # "device_id1:token1,device_id2:token2" (optional bootstrap)
+#   wrangler secret put AGENTLAMP_ADMIN_TOKEN      # in-Worker /admin revoke gate (constant-time
+#                                                  # bearer; UNSET = /admin fail-closed 403. Cloudflare
+#                                                  # Access can ALSO gate /admin at the edge.)
+# Gated step: `wrangler login` (one-time OAuth) is required before `wrangler secret`/`deploy`
+#   — see docs/cloud/deploy.md. Do NOT run it autonomously.
+
+name = "agentlamp-relay"
+main = "src/index.ts"
+compatibility_date = "2026-06-02"
+compatibility_flags = ["nodejs_compat"]
+
+# Non-secret config. RELAY_HOST is a placeholder; override at deploy (see header).
+#
+# Pinned ROOT CA bundle served by GET /api/v1/device/:id/cacerts (firmware CA-rotation refresh).
+# Precedence: env CA_BUNDLE (set below or via `wrangler secret put CA_BUNDLE`) → KV
+# CONFIG["ca_bundle"] → the embedded DEFAULT_CA_BUNDLE in src/ca.ts (ISRG Root X1 + DigiCert
+# Global Root G2 + Baltimore CyberTrust Root — the same roots compiled into the firmware
+# fallback). Leaving CA_BUNDLE unset ships the default, so a stock deploy works out of the box.
+# To rotate: `wrangler secret put CA_BUNDLE` (paste the new PEM bundle) OR write KV CONFIG
+# ca_bundle — NO firmware reflash needed.
+[vars]
+RELAY_HOST = "relay.example.invalid"
+RETENTION_DAYS = "30"
+DEVICE_RATE_PER_MIN = "20"
+COLLECTOR_RATE_PER_MIN = "60"
+
+# Strongly-consistent, revocation-critical state lives in the Durable Object (I4).
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "RelayDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayDO"]
+
+# Non-urgent config/cache ONLY (eventually consistent — NOT revocation; I4).
+# Placeholder id — replace with the real namespace id from `wrangler kv namespace create CONFIG`.
+[[kv_namespaces]]
+binding = "CONFIG"
+# Account-specific (I3): NOT committed. Fill from `wrangler kv namespace create CONFIG`
+# (the live ids are recorded in ~/.config/agentlamp/relay-deploy.txt).
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+preview_id = "REPLACE_WITH_KV_PREVIEW_ID"
