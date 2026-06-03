@@ -27,25 +27,41 @@ import urllib.request
 # Built once; reused for every call. Empty ProxyHandler => unconditional bypass.
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
+# A NON-default User-Agent. Cloudflare's edge bot-mitigation rejects the stock
+# "Python-urllib/x.y" UA with HTTP 403 "error 1010" (Browser Integrity Check), which
+# would make every relay push from a real collector silently fail. Any clean custom UA
+# passes. (Verified live against the deployed Worker, 2026-06-03.)
+USER_AGENT = "agentlamp-collector/0.1"
+
 
 class PostError(Exception):
     """Transport-level failure (connection refused / timeout / DNS). The caller
     decides whether to retry; carries no response body."""
 
 
-def post_json(url: str, payload: dict, *, timeout: float = 3.0) -> tuple[int, dict]:
+def post_json(url: str, payload: dict, *, timeout: float = 3.0,
+              headers: dict | None = None) -> tuple[int, dict]:
     """POST ``payload`` as JSON to ``url``, bypassing any env proxy.
 
     Returns ``(status_code, parsed_body)``. A 4xx/5xx is returned (not raised) so
     the caller can read an application-level rejection (e.g. the server's 422
-    ``{"rejected": true, "reason": ...}``). A transport failure raises ``PostError``.
+    ``{"rejected": true, "reason": ...}`` or the relay admin's 401/403/400). A
+    transport failure raises ``PostError``.
+
+    ``headers`` (optional) merges extra request headers on top of the defaults —
+    e.g. ``{"Authorization": "Bearer <admin-token>"}`` for the relay's authed
+    ``/admin/.../enroll`` + ``/admin/.../revoke`` routes (build-spec I5/I4). The
+    caller's headers win on a key collision.
     """
     data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    hdrs = {"Content-Type": "application/json", "Connection": "close", "User-Agent": USER_AGENT}
+    if headers:
+        hdrs.update(headers)
     req = urllib.request.Request(
         url,
         data=data,
         method="POST",
-        headers={"Content-Type": "application/json", "Connection": "close"},
+        headers=hdrs,
     )
     try:
         with _OPENER.open(req, timeout=timeout) as resp:
@@ -62,7 +78,8 @@ def post_json(url: str, payload: dict, *, timeout: float = 3.0) -> tuple[int, di
 
 def post_empty(url: str, *, timeout: float = 3.0) -> tuple[int, dict]:
     """POST with an empty body (used for ``/admin/heartbeat``)."""
-    req = urllib.request.Request(url, data=b"", method="POST", headers={"Connection": "close"})
+    req = urllib.request.Request(url, data=b"", method="POST",
+                                 headers={"Connection": "close", "User-Agent": USER_AGENT})
     try:
         with _OPENER.open(req, timeout=timeout) as resp:
             return resp.status, _read_json(resp)

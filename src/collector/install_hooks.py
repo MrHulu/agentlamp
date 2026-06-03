@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import sys
 import time
@@ -27,26 +28,58 @@ import time
 _THIS = pathlib.Path(__file__).resolve()
 HOOK_SINK = _THIS.parent / "hook_sink.py"
 REPO_ROOT = _THIS.parents[2]
-_VENV_PY = REPO_ROOT / ".venv" / "bin" / "python"
 
 # Claude: omit "matcher" to fire for all tools/notifications.
 CLAUDE_EVENTS = (
     "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
     "PostToolUseFailure", "PermissionRequest", "Notification", "Stop", "SessionEnd",
 )
-# Codex: same lifecycle minus Claude-only Notification/SessionEnd; add compaction.
+# Codex lifecycle (verified against developers.openai.com/codex/hooks): the full set minus
+# the Claude-only Notification/SessionEnd. Includes the compaction + subagent-start events,
+# which normalize.py maps to THINKING states.
 CODEX_EVENTS = (
     "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-    "PermissionRequest", "SubagentStop", "Stop",
+    "PermissionRequest", "PreCompact", "PostCompact",
+    "SubagentStart", "SubagentStop", "Stop",
 )
 
 
-def _python() -> str:
-    return str(_VENV_PY) if _VENV_PY.exists() else "python3"
+def _venv_python() -> str:
+    """The repo venv interpreter for the CURRENT OS, else the running interpreter.
+    POSIX venvs put it at ``.venv/bin/python``; Windows at ``.venv/Scripts/python.exe``."""
+    if os.name == "nt":
+        win = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+        if win.exists():
+            return str(win)
+    else:
+        posix = REPO_ROOT / ".venv" / "bin" / "python"
+        if posix.exists():
+            return str(posix)
+    return sys.executable or "python3"
+
+
+def _quote(path: str) -> str:
+    """Shell-quote a path so a space anywhere in the install dir can't split the command.
+    POSIX uses shlex (single-quotes); Windows wraps in double-quotes (cmd/PowerShell)."""
+    if os.name == "nt":
+        return f'"{path}"' if (" " in path or path == "") else path
+    return shlex.quote(path)
 
 
 def _command(provider: str) -> str:
-    return f"{_python()} {HOOK_SINK} --provider {provider}"
+    py = _quote(_venv_python())
+    sink = _quote(str(HOOK_SINK))
+    return f"{py} {sink} --provider {provider}"
+
+
+def _toml_str(s: str) -> str:
+    """Emit a TOML string for a path/command. Prefer a LITERAL (single-quoted) string so
+    Windows backslashes are NOT treated as escape sequences (``\\U``/``\\P`` would make the
+    config invalid TOML). Fall back to an escaped basic string if the value contains a
+    single quote (rare in paths)."""
+    if "'" not in s:
+        return f"'{s}'"
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def claude_hooks_block() -> dict:
@@ -58,15 +91,17 @@ def claude_hooks_block() -> dict:
 
 
 def codex_hooks_toml() -> str:
-    cmd = _command("codex")
+    cmd = _toml_str(_command("codex"))
     lines = ["# AgentLamp collector hooks — append to ~/.codex/config.toml",
-             "# (user-level config; repo-local .codex hooks may not fire interactively, GH #17532)"]
+             "# (user-level config; repo-local .codex hooks may not fire interactively, GH #17532)",
+             "# NOTE: the command embeds this machine's ABSOLUTE paths — re-run install_hooks",
+             "#       after moving/cloning the repo (and re-trust via the Codex /hooks prompt)."]
     for ev in CODEX_EVENTS:
         lines.append("")
         lines.append(f"[[hooks.{ev}]]")
         lines.append(f"[[hooks.{ev}.hooks]]")
         lines.append('type = "command"')
-        lines.append(f'command = "{cmd}"')
+        lines.append(f"command = {cmd}")
         lines.append("timeout = 5")
     return "\n".join(lines) + "\n"
 
@@ -121,6 +156,8 @@ def write_claude(path_str: str) -> int:
     path.write_text(json.dumps(existing, indent=2) + "\n")
     print(f"merged {added} Claude hook event(s) into {path}"
           + (f" (backup: {bak.name})" if bak else ""))
+    print("note: hook commands embed this machine's absolute paths — re-run after moving "
+          "the repo.", file=sys.stderr)
     return 0
 
 
@@ -137,7 +174,8 @@ def write_codex(path_str: str) -> int:
     sep = "" if current.endswith("\n") or not current else "\n"
     path.write_text(current + sep + "\n" + block)
     print(f"appended Codex hooks to {path}" + (f" (backup: {bak.name})" if bak else ""))
-    print("note: Codex requires persisted hook trust (or --dangerously-bypass-hook-trust).",
+    print("note: Codex requires persisted hook trust (or --dangerously-bypass-hook-trust); "
+          "commands embed this machine's absolute paths — re-run after moving the repo.",
           file=sys.stderr)
     return 0
 

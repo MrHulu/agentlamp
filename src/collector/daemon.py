@@ -12,8 +12,11 @@ Long-running loop:
      failure (server down/restarting) LEAVE the record and retry on the next loop
      forever — the reaper, not a retry cap, bounds the queue, so a server restart
      loses nothing,
-  5. heartbeat ``/admin/heartbeat`` at least every HEARTBEAT_INTERVAL_S so the
-     collector is never marked offline during idle periods.
+  5. heartbeat at least every HEARTBEAT_INTERVAL_S so the collector is never marked
+     offline during idle periods — local mode hits ``/admin/heartbeat`` over loopback;
+     RELAY mode pushes a SIGNED ``collector.heartbeat`` to the relay (P1, devlog/16),
+     because the loopback heartbeat never reaches the cloud and an idle-but-present
+     owner would otherwise flip the whole fleet offline.
 
 Run:
     cd <repo>/src && ../.venv/bin/python -m collector.daemon
@@ -33,11 +36,16 @@ _SRC = pathlib.Path(__file__).resolve().parents[1]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from collector import config, netpost  # noqa: E402
+from collector import config, netpost, relaypost  # noqa: E402
 from collector.config import S  # noqa: E402
 from collector.normalize import normalize_record  # noqa: E402
 
 _STOP = False
+
+# Relay-mode clock correction learned from a `stale_timestamp` 401 (server_time -
+# local). Applied to the signed timestamp so a skewed local clock still signs an
+# in-window request. Resynced AT MOST once per stale reject — never a tight loop.
+_RELAY_CLOCK_OFFSET = 0.0
 
 
 def _handle_signal(signum, frame):  # noqa: ARG001
@@ -113,29 +121,115 @@ def drain_once(pepper: bytes, aliases) -> dict:
             counts["heartbeat" if result.action == "heartbeat" else "dropped"] += 1
             continue
 
-        try:
-            status_code, body = netpost.post_json(
-                f"{config.SERVER_BASE}/admin/event", result.event
-            )
-        except netpost.PostError:
-            counts["requeued"] += 1   # server unreachable → leave + retry (reaper bounds)
-            continue
-
-        if status_code == 200:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                _log(f"WARN: post ok but unlink failed ({path.name}) — will retry/reap")
-            counts["posted"] += 1
-        elif status_code == 422:
-            reason = (body or {}).get("reason", "sanitization_failed")
-            ph = (body or {}).get("payload_hash", "")
-            _quarantine(path, str(reason), str(ph))
-            counts["rejected"] += 1
-            _log(f"reject (server 422 {reason}): {result.diag}")
+        if config.RELAY_MODE:
+            _post_relay(path, result, counts, pepper=pepper, aliases=aliases)
         else:
-            counts["requeued"] += 1   # transient 5xx → leave + retry
+            _post_local(path, result, counts)
     return counts
+
+
+def _post_local(path: pathlib.Path, result, counts: dict) -> None:
+    """Local mode (unchanged): POST the shorthand to /admin/event over loopback.
+
+    200 → delete; 422 → dead-letter (never retry); transport/5xx → leave + retry."""
+    try:
+        status_code, body = netpost.post_json(f"{config.SERVER_BASE}/admin/event", result.event)
+    except netpost.PostError:
+        counts["requeued"] += 1   # server unreachable → leave + retry (reaper bounds)
+        return
+
+    if status_code == 200:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            _log(f"WARN: post ok but unlink failed ({path.name}) — will retry/reap")
+        counts["posted"] += 1
+    elif status_code == 422:
+        reason = (body or {}).get("reason", "sanitization_failed")
+        ph = (body or {}).get("payload_hash", "")
+        _quarantine(path, str(reason), str(ph))
+        counts["rejected"] += 1
+        _log(f"reject (server 422 {reason}): {result.diag}")
+    else:
+        counts["requeued"] += 1   # transient 5xx → leave + retry
+
+
+def _post_relay(path: pathlib.Path, result, counts: dict, *, pepper: bytes, aliases) -> None:
+    """Relay mode: sign the shorthand into a 1-event batch + POST it to the relay.
+
+    ``pepper`` + ``aliases`` drive the collector-side sanitizer (BUILD-SPEC I1): the
+    relay push serializes the sanitizer OUTPUT (``display_title`` as ``title-<hmac>``,
+    neutral aliases, canonical enums), so the cloud's VALIDATE-only gate accepts it.
+
+    Failure policy (collector_ingest_api.md):
+      * misconfig (no host/kid/secret) → leave + retry (a later enroll fixes it),
+      * transport failure → leave + retry (reaper bounds the queue),
+      * 401 stale_timestamp → resync clock ONCE from server_time, then leave + retry
+        (the NEXT loop signs with the corrected offset — no tight loop here),
+      * other request-level reject (bad_signature/revoked/...) → dead-letter (can't pass),
+      * per-event ``rejected`` in results[] → dead-letter (reason + hash only), never retry,
+      * accepted → delete.
+    """
+    global _RELAY_CLOCK_OFFSET
+    secret = config.relay_secret()
+    if not (config.RELAY_HOST and config.RELAY_KID and secret):
+        counts["requeued"] += 1   # un-enrolled / partial config → wait for enroll
+        return
+
+    # Idempotency-Key: a retry of THIS record (same source filename) returns the prior
+    # result without re-applying (the file name is the stable per-record anchor).
+    idem = f"{config.COLLECTOR_ID}:{path.stem}"
+    try:
+        res = relaypost.push_batch(
+            relay_host=config.RELAY_HOST, collector_id=config.COLLECTOR_ID,
+            kid=config.RELAY_KID, secret=secret, shorthands=[result.event],
+            pepper=pepper, aliases=aliases,
+            clock_offset=_RELAY_CLOCK_OFFSET, idempotency_key=idem,
+        )
+    except netpost.PostError:
+        counts["requeued"] += 1   # transport failure → leave + retry
+        return
+
+    if not res.ok:
+        if res.http_status == 401 and res.reason == "stale_timestamp":
+            # Resync ONCE from the server clock; do NOT loop — retry next drain.
+            _RELAY_CLOCK_OFFSET = relaypost.resync_offset(res.server_time)
+            counts["requeued"] += 1
+            _log(f"relay stale_timestamp → resync offset={_RELAY_CLOCK_OFFSET:+.1f}s")
+            return
+        if res.http_status == 429:
+            counts["requeued"] += 1   # rate limited → leave + retry (Retry-After)
+            return
+        # bad_signature / collector_revoked / payload_hash_mismatch / batch limits:
+        # the record can never pass as-is → dead-letter (reason + hash only).
+        digest = res.body.get("payload_hash", "") or _payload_hash(result.event)
+        _quarantine(path, f"relay_{res.reason or res.http_status}", str(digest))
+        counts["rejected"] += 1
+        _log(f"relay reject (request {res.http_status} {res.reason}): {result.diag}")
+        return
+
+    # HTTP 200 — inspect per-event results (single-event batch).
+    ev = (res.results or [{}])[0]
+    status = str(ev.get("status", "accepted"))
+    if status == "rejected":
+        reason = str(ev.get("reason", "sanitization_failed"))
+        _quarantine(path, f"relay_event_{reason}", _payload_hash(result.event))
+        counts["rejected"] += 1
+        _log(f"relay reject (event {reason}): {result.diag}")
+        return
+    # accepted (or duplicate) → drop the record.
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        _log(f"WARN: relay push ok but unlink failed ({path.name}) — will retry/reap")
+    counts["posted"] += 1
+
+
+def _payload_hash(event: dict) -> str:
+    """sha256 of the shorthand body — for dead-letter accounting ONLY (never the raw value)."""
+    import hashlib
+    raw = json.dumps(event, separators=(",", ":"), ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def reap(now: float) -> dict:
@@ -193,11 +287,46 @@ def reap(now: float) -> dict:
 
 
 def _heartbeat() -> bool:
+    """Refresh the cloud's collector-liveness clock so an idle-but-present owner is
+    never marked offline (P1, docs/devlog/16).
+
+    Relay mode → push a SIGNED ``collector.heartbeat`` to the relay (the local
+    ``/admin/heartbeat`` does not reach the cloud, so without this the relay's
+    ``last_collector_heartbeat`` would go stale during idle and flip the fleet
+    offline). Local mode → the loopback ``/admin/heartbeat`` (unchanged).
+
+    A stale_timestamp on the relay heartbeat resyncs the SAME ``_RELAY_CLOCK_OFFSET``
+    the drain path uses (once, no loop). Returns True iff the heartbeat landed."""
+    if config.RELAY_MODE:
+        return _relay_heartbeat()
     try:
         code, _ = netpost.post_empty(f"{config.SERVER_BASE}/admin/heartbeat")
         return code == 200
     except netpost.PostError:
         return False
+
+
+def _relay_heartbeat() -> bool:
+    """Sign + push a ``collector.heartbeat`` to the relay. Misconfig (no host/kid/
+    secret) or transport failure → False (the next loop retries). A stale_timestamp
+    resyncs the offset ONCE (shared with the drain path), no tight loop."""
+    global _RELAY_CLOCK_OFFSET
+    secret = config.relay_secret()
+    if not (config.RELAY_HOST and config.RELAY_KID and secret):
+        return False
+    try:
+        res = relaypost.push_heartbeat(
+            relay_host=config.RELAY_HOST, collector_id=config.COLLECTOR_ID,
+            kid=config.RELAY_KID, secret=secret, clock_offset=_RELAY_CLOCK_OFFSET,
+        )
+    except netpost.PostError:
+        return False
+    if res.ok:
+        return True
+    if res.http_status == 401 and res.reason == "stale_timestamp":
+        _RELAY_CLOCK_OFFSET = relaypost.resync_offset(res.server_time)
+        _log(f"relay heartbeat stale_timestamp → resync offset={_RELAY_CLOCK_OFFSET:+.1f}s")
+    return False
 
 
 def run() -> int:
@@ -208,8 +337,12 @@ def run() -> int:
     pepper = config.load_pepper()
     aliases = config.load_aliases()
 
-    _log(f"start: queue={config.QUEUE_DIR} server={config.SERVER_BASE} "
-         f"aliases={config.ALIAS_FILE}")
+    if config.RELAY_MODE:
+        _log(f"start: mode=relay queue={config.QUEUE_DIR} relay={config.RELAY_HOST} "
+             f"collector_id={config.COLLECTOR_ID} kid={config.RELAY_KID or '(unset)'}")
+    else:
+        _log(f"start: mode=local queue={config.QUEUE_DIR} server={config.SERVER_BASE} "
+             f"aliases={config.ALIAS_FILE}")
     last_heartbeat = 0.0
     last_reap = 0.0
     while not _STOP:

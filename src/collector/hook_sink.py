@@ -47,9 +47,30 @@ def _provider() -> str:
     return os.environ.get("AGENTLAMP_PROVIDER", "claude").strip().lower()
 
 
+def _read_all_thread_deadline(seconds: float) -> bytes:
+    """Cross-platform deadline read for when POSIX itimer/SIGALRM is unavailable (Windows,
+    or not the main thread): read stdin in a daemon thread and ABANDON it if it blocks past
+    the deadline. The daemon thread is reaped at process exit, so the <1s fire-and-forget
+    guarantee holds even if the host keeps the stdin pipe open."""
+    import threading
+
+    box: dict[str, bytes] = {}
+
+    def _reader() -> None:
+        try:
+            box["data"] = sys.stdin.buffer.read()
+        except Exception:
+            box["data"] = b""
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    t.join(seconds)
+    return box.get("data", b"")
+
+
 def _read_stdin_deadline(seconds: float = 0.8) -> bytes:
     """Read all of stdin, but never block past ``seconds`` — the <1s fire-and-forget
-    guarantee must hold even if the host keeps the stdin pipe open (POSIX itimer)."""
+    guarantee must hold even if the host keeps the stdin pipe open."""
     if sys.stdin.isatty():
         return b""
     import signal
@@ -61,11 +82,10 @@ def _read_stdin_deadline(seconds: float = 0.8) -> bytes:
         signal.signal(signal.SIGALRM, _on_alarm)
         signal.setitimer(signal.ITIMER_REAL, seconds)
     except (ValueError, OSError, AttributeError):
-        # Not the main thread / unsupported platform — best-effort plain read.
-        try:
-            return sys.stdin.buffer.read()
-        except Exception:
-            return b""
+        # Windows / non-main-thread: SIGALRM+itimer unavailable — use a real threaded
+        # deadline instead of a plain blocking read (which could hang to the host's hook
+        # timeout). Claude Code + Codex both run on Windows.
+        return _read_all_thread_deadline(seconds)
     try:
         return sys.stdin.buffer.read()
     except (TimeoutError, Exception):

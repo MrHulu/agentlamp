@@ -13,4 +13,4 @@ the collector never reinvents redaction. See ``docs/collector/collector_contract
 and ``docs/devlog/06-task005-kickoff.md``.
 """
 
-__all__ = ["config", "netpost", "normalize"]
+__all__ = ["config", "netpost", "normalize", "relaypost", "secretstore", "cli"]

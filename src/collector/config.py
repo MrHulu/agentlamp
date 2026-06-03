@@ -56,12 +56,94 @@ SERVER_BASE = os.environ.get("AGENTLAMP_SERVER_BASE", "http://127.0.0.1:8787").r
 # Neutral account label (GOTCHA #5: never an email or plan tier).
 ACCOUNT = os.environ.get("AGENTLAMP_ACCOUNT", "main")
 
+# --------------------------------------------------------------------------- #
+# Relay mode (I3: host/kid/secret are NEVER hardcoded — env/keyring only).
+#
+# Local mode (default): the daemon POSTs shorthand bodies to SERVER_BASE/admin/event
+# over loopback. RELAY mode instead signs each batch and POSTs it to a remote
+# Cloudflare relay at RELAY_HOST/api/v1/collectors/{kid}/events.
+#
+#   AGENTLAMP_RELAY_HOST   — e.g. https://relay.example.com   (presence enables relay)
+#   AGENTLAMP_RELAY_KID    — the active collector key id (selects the signing secret)
+#   AGENTLAMP_COLLECTOR_ID — the neutral collector id in the URL ([A-Za-z0-9_-]{1,64})
+#   AGENTLAMP_RELAY_SECRET — the signing secret (TEST/CI override; prod reads the keyring)
+#
+# A relay deployment forces HMAC labels (no readable folder names leak to the cloud);
+# enroll sets AGENTLAMP_LOCAL_LABELS=0 accordingly.
+# --------------------------------------------------------------------------- #
+# Relay config file (enroll writes it; read DIRECTLY here, no POSIX `source` needed).
+# devlog/16 MED #5: the POSIX `relay.env` only works on a shell that sources it —
+# useless on Windows / cron / a bare daemon launch. So enroll ALSO writes a portable
+# ``relay.json`` and config reads it here at import. ENV ALWAYS WINS (tests/CI + an
+# explicit override stay authoritative); the file only fills the gaps so a fresh
+# daemon launch picks up the enrolled relay config with nothing sourced.
+RELAY_CONFIG_FILE = _expand(
+    os.environ.get("AGENTLAMP_RELAY_CONFIG_FILE", str(CONFIG_DIR / "relay.json"))
+)
+
+
+def _load_relay_config_file() -> dict:
+    """Read ``relay.json`` (enroll's portable, source-free relay config). Missing /
+    malformed → empty dict (env-only operation is still fine). Never raises."""
+    import json
+    try:
+        if RELAY_CONFIG_FILE.is_file():
+            data = json.loads(RELAY_CONFIG_FILE.read_text(encoding="utf-8") or "{}")
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+_RELAY_FILE = _load_relay_config_file()
+
+
+def _relay_setting(env_key: str, file_key: str, default: str = "") -> str:
+    """Resolve a relay setting: env var WINS, else the relay.json file, else default."""
+    v = os.environ.get(env_key, "")
+    if v:
+        return v
+    fv = _RELAY_FILE.get(file_key, "")
+    return str(fv) if fv else default
+
+
+RELAY_HOST = _relay_setting("AGENTLAMP_RELAY_HOST", "relay_host").rstrip("/")
+RELAY_KID = _relay_setting("AGENTLAMP_RELAY_KID", "kid")
+COLLECTOR_ID = _relay_setting("AGENTLAMP_COLLECTOR_ID", "collector_id") or ACCOUNT
+# Explicit mode override (env or file); otherwise relay is on iff a host is configured.
+_mode = (os.environ.get("AGENTLAMP_MODE", "") or str(_RELAY_FILE.get("mode", ""))).strip().lower()
+RELAY_MODE = (_mode == "relay") or (_mode != "local" and bool(RELAY_HOST))
+# Test/CI secret override (prod loads from the OS keyring via secretstore).
+RELAY_SECRET_ENV = os.environ.get("AGENTLAMP_RELAY_SECRET", "")
+
+
+def relay_secret() -> bytes | None:
+    """The collector signing secret for relay mode: env override (tests/CI) else the
+    OS keyring entry keyed by the active kid. None if neither is present."""
+    if RELAY_SECRET_ENV:
+        return RELAY_SECRET_ENV.encode("utf-8")
+    if not RELAY_KID:
+        return None
+    try:
+        from . import secretstore
+        v = secretstore.get_secret(RELAY_KID)
+        return v.encode("utf-8") if v else None
+    except Exception:
+        return None
+
 # Local single-owner lamp (default): show the REAL, readable project name (the cwd
 # basename) on the orb instead of an opaque HMAC hash. The HMAC aliasing exists to
 # protect a cwd from a *cloud relay operator* — in local mode the only viewer is the
 # owner at their own desk, so hashing their own folder names just makes the lamp
 # unreadable. Set AGENTLAMP_LOCAL_LABELS=0 to force HMAC labels (e.g. relay mode).
-LOCAL_LABELS = os.environ.get("AGENTLAMP_LOCAL_LABELS", "1") == "1"
+#
+# Resolution: explicit env wins; else in RELAY mode default to HMAC labels (0) so a
+# source-free relay launch (config driven by relay.json, devlog/16 MED #5) never
+# leaks readable folder names to the cloud even when nothing sourced the env fragment.
+if "AGENTLAMP_LOCAL_LABELS" in os.environ:
+    LOCAL_LABELS = os.environ.get("AGENTLAMP_LOCAL_LABELS", "1") == "1"
+else:
+    LOCAL_LABELS = not RELAY_MODE
 
 # Daemon timing.
 DRAIN_INTERVAL_S = float(os.environ.get("AGENTLAMP_DRAIN_INTERVAL_S", "0.5"))

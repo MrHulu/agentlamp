@@ -264,6 +264,14 @@ def normalize_record(record: dict, *, pepper: bytes, aliases) -> NormalizeResult
         "model": provider,
     }
 
+    # Optional per-session title (Claude `--name` / `/rename` → `session_title`; Codex has
+    # none, so this is absent there). Read ONLY this field — NOT the `prompt` field that
+    # rides on UserPromptSubmit. The server's sanitizer (safe_title) is the authoritative
+    # gate that drops anything path/secret-bearing and HMAC-collapses it in relay mode.
+    raw_title = hook.get("session_title") or hook.get("sessionTitle")
+    if isinstance(raw_title, str) and raw_title.strip():
+        base["session_title"] = raw_title.strip()
+
     # --- map event -> status ----------------------------------------------- #
     if ekey in _FAIL_EVENTS:
         err = hook.get("error")

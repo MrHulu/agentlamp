@@ -97,6 +97,20 @@ def test_prompt_submit_thinking_no_prompt(pepper, aliases):
     assert "secret" not in json.dumps(r.event)
 
 
+def test_session_title_extracted_but_prompt_never_is(pepper, aliases):
+    """normalize carries the per-session title (server sanitizes it later) but must read
+    ONLY session_title — never the raw `prompt` that rides on the same event."""
+    r = norm(claude_hook("UserPromptSubmit", session_title="auth refactor",
+                         prompt="implement the secret auth flow"), pepper, aliases)
+    assert r.event.get("session_title") == "auth refactor"
+    assert "secret" not in json.dumps(r.event)   # prompt still never leaks
+
+
+def test_codex_carries_no_session_title(pepper, aliases):
+    r = norm(codex_hook("SessionStart"), pepper, aliases)
+    assert "session_title" not in r.event   # Codex hooks have no title field
+
+
 @pytest.mark.parametrize("tool,expected", [
     ("Read", "READING"), ("Grep", "READING"), ("Glob", "READING"),
     ("WebSearch", "READING"),
