@@ -54,7 +54,11 @@ PREVIEW_HTML = r"""<!doctype html>
   .tiny{font:600 10px/1.5 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint)}
   .rows{display:flex;flex-direction:column;gap:9px}
   .row{display:flex;align-items:center;gap:8px;font:600 12px/1 var(--font)}
-  .row .st{margin-left:auto;font:700 9px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;
+  /* name: single line + ellipsis — the device renderer never wraps (it shrinks the
+     font then ellipsizes), so wrapping here would mislead the layout check. */
+  .row .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .cnt{flex:none;color:var(--ink-faint);font-weight:600;font-size:11px}
+  .row .st{margin-left:auto;flex:none;font:700 9px/1 var(--mono);letter-spacing:.06em;text-transform:none;
            padding:3px 6px;border-radius:5px;color:var(--accent);background:color-mix(in srgb,var(--accent) 16%,transparent)}
   .q{display:flex;flex-direction:column;gap:5px;margin-bottom:13px}
   .q .ql{display:flex;justify-content:space-between;font:600 11px/1 var(--font);color:var(--ink)}
@@ -134,8 +138,20 @@ function render(f,bytes){
     html+=`</div><div class="bot tiny">top-2 risk</div>`;
   } else if(f.scene==="fleet"){
     html=`<div class="top"><span class="who"><i class="dot"></i>agents</span><span>${time}</span></div><div class="mid"><div class="rows">`;
-    (f.fleet||[]).forEach(r=>{html+=`<div class="row"><span>${esc(r.provider)} <span style="color:var(--ink-faint)">×${r.count}</span></span><span class="st">${esc(r.status)}</span></div>`;});
-    html+=`</div></div><div class="bot tiny">${(f.fleet||[]).length} groups${f.fleet_more?` · +${f.fleet_more}`:""}</div>`;
+    // Approximate the device fleet row (NOT pixel-identical — HTML can't replicate the
+    // LovyanGFX font shrink). Render at most 5 rows (MUST MATCH state.FLEET_MAX_ROWS /
+    // renderer.h fleet()), fold further rows + fleet_more into "+N more", count active over
+    // the rendered rows, and use the SAME badge char (ASCII "x", not "×") + the same 4-char
+    // lowercase status the firmware draws — so the simulator can't hide a real on-device diff.
+    const all=(f.fleet||[]), shown=all.slice(0,5);
+    let activeTotal=0;
+    shown.forEach(r=>{activeTotal+=(r.count||0);
+      // count badge is its OWN flex item (NOT inside .nm) so the name's ellipsis can't swallow it.
+      const badge=(r.count>1)?`<span class="cnt">x${r.count}</span>`:"";
+      const st=esc(String(r.status||"").slice(0,4).toLowerCase());
+      html+=`<div class="row"><span class="nm">${esc(r.provider)}</span>${badge}<span class="st">${st}</span></div>`;});
+    let more=f.fleet_more||0; all.slice(5).forEach(r=>more+=(r.count||0));
+    html+=`</div></div><div class="bot tiny">${activeTotal} active${more?`  +${more} more`:""}</div>`;
   } else { /* focus + stale */
     html=`<div class="top"><span class="who"><i class="dot"></i>${esc(f.scene)}</span><span>${time}</span></div>
       <div class="mid"><div class="kicker" style="margin-bottom:6px">${esc(p.provider)} · ${esc(p.account)}</div>

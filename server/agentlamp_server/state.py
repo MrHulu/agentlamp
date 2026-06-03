@@ -13,9 +13,12 @@ Session liveness (``architecture.md`` → Session Lifetime / Liveness):
 
 Frame constraints (``device_frame_api.md``):
   * body < 2 KB (hard cap, trimmed server-side before send),
-  * ``fleet`` ≤ 6 (truncate lowest priority; ``fleet_more`` overflow count),
+  * ``fleet`` ≤ 5 (the device renders 5 rows; truncate lowest priority, overflow active
+    agents fold into the ``fleet_more`` count),
   * ``quota`` ≤ 2 (top-2 risk),
-  * provider in ``primary``/``fleet`` is the Title-case display label.
+  * ``primary.provider`` is the Title-case provider label (``Codex``/``Claude``); a
+    ``fleet`` row's ``provider`` field instead carries the CLEAN project label (rows group
+    by project) with the count in the separate ``count`` field — no baked ``xN`` suffix.
 """
 from __future__ import annotations
 
@@ -41,6 +44,10 @@ COLLECTOR_HEARTBEAT_STALE_S = float(os.environ.get("AGENTLAMP_HEARTBEAT_STALE_S"
 FRAME_TTL = 5
 FRAME_SCHEMA_VERSION = 1
 FRAME_BYTE_CAP = 2048
+# Max fleet rows in a frame. The device renders exactly this many; keeping the WIRE cap
+# equal to the render cap means no row is sent-but-invisible and "5" has one home.
+# (firmware renderer.h::fleet draws min(fleetCount, 5); preview.py slices to the same.)
+FLEET_MAX_ROWS = 5
 
 # Quota risk threshold that flips the scene to `alert` / contributes a modifier.
 QUOTA_DANGER_RATIO = 0.90
@@ -67,6 +74,24 @@ BASE_SCORE = {
 MODIFIER_LOW_QUOTA = 30
 MODIFIER_PINNED = 50
 MODIFIER_STALE_10MIN = -20
+
+# "Active" = an agent genuinely working right now. IDLE/DONE/UNKNOWN are calm, and
+# STALE/OFFLINE are liveness (not-working) states. Single source of truth shared by
+# the scene selector (≥2 active → fleet overview) and the fleet-row aggregation, so
+# the "how many are busy" answer can never drift between the two (R2/TASK-010).
+_ACTIVE_EXCLUDED = frozenset({"IDLE", "DONE", "UNKNOWN", "STALE", "OFFLINE"})
+
+
+def _is_active(eff_status: str) -> bool:
+    return eff_status not in _ACTIVE_EXCLUDED
+
+
+def _display_label(s: "Session") -> str:
+    """The row/focus label for a session: its sanitized title when the session is named
+    (claude --name / /rename → display_title), else the project alias. Lets named sessions
+    surface individually instead of collapsing into the project's `ai-center xN` aggregate
+    (R4/TASK-012). Falls back to the em-dash placeholder when neither is present."""
+    return s.display_title or s.project_alias or "—"
 
 # --------------------------------------------------------------------------- #
 # status → accent (from the design mockup CSS, docs/ui/mockups/scenes.html).
@@ -126,6 +151,7 @@ class Session:
     needs_attention: bool = False
     error_label: str | None = None
     pinned: bool = False
+    display_title: str | None = None   # sanitized session title (Claude --name/rename); None=use project
 
     def key(self) -> tuple[str, str, str]:
         return (self.provider, self.account_alias, self.session_id or self.project_alias)
@@ -205,6 +231,10 @@ class FrameState:
         self.last_collector_heartbeat: float = _now()
         self._seq = 0
         self._last_signature: str | None = None
+        # Overflow active-agent count from the last _fleet_block(); _enforce_byte_cap reads
+        # it. Declared here so it always exists (no implicit _fleet_block-before-cap order
+        # dependency / AttributeError if _enforce_byte_cap is ever called directly).
+        self._pending_fleet_more = 0
         self.redaction_count = 0
         self.rejection_count = 0
         # Single-owner device record (pairing/auth). Token stored as hash only.
@@ -274,37 +304,78 @@ class FrameState:
                     event, aliases=self.aliases, pepper=self.pepper,
                     local_display=self.local_display,
                 )
-            except S.SanitizationError as exc:
+            except S.SanitizationError:
                 self.rejection_count += 1
                 raise
-            p = clean["payload"]
-            now = _now()
-            sess = Session(
-                provider=clean["provider"],
-                account_alias=p.get("account_alias", "main"),
-                project_alias=p.get("project_alias", "—"),
-                status=p.get("status", "UNKNOWN"),
-                task_label=p.get("task_label", "unknown"),
-                model=p.get("model", "unknown"),
-                session_id=clean.get("provider_session_id", "") or "",
-                started_at=float(event.get("started_at") or now),
-                updated_at=now,
-                needs_attention=bool(p.get("needs_attention", False)),
-                error_label=p.get("error_label"),
+            r = self._upsert_session(
+                clean["provider"], clean["payload"],
+                clean.get("provider_session_id", ""), event.get("started_at"),
             )
-            self.last_collector_heartbeat = now
-            existing = self.sessions.get(sess.key())
-            if existing is not None:
-                # Late events must not resurrect / regress; keep started_at.
-                sess.started_at = existing.started_at
-                sess.pinned = existing.pinned
-            self.sessions[sess.key()] = sess
             self.redaction_count += 1
-            return {"applied": True, "status": sess.status, "scene_key": sess.key()}
+            return r
+
+    def apply_validated_event(self, event: dict) -> dict:
+        """Relay-mode CLOUD path (BUILD-SPEC I1, docs/devlog/16): VALIDATE an already-sanitized
+        event — do NOT re-run the transforms — then apply. The collector is the only transformer;
+        the cloud's independent second gate strictly validates the sanitized OUTPUT shape
+        (``validate.py``: key allowlist + forbidden scan + enum membership + neutral-alias shape),
+        mirrored byte-for-decision by the TS Worker/DO. Rejects (never coerces) a non-canonical
+        event. Returns ``{"applied": True, ...}`` or raises ``SanitizationError``."""
+        from . import validate as Vd
+
+        with self._lock:
+            try:
+                clean = Vd.validate_sanitized_event(event)
+            except S.SanitizationError:
+                self.rejection_count += 1
+                raise
+            r = self._upsert_session(
+                S.normalize_provider(clean.get("provider", "")),
+                clean.get("payload") or {},
+                clean.get("provider_session_id", ""), event.get("started_at"),
+            )
+            self.redaction_count += 1
+            return r
+
+    def _upsert_session(self, provider: str, payload: dict, psid: str, started_at_raw) -> dict:
+        """Build + upsert a Session from an ALREADY-CLEAN payload — shared by the sanitize path
+        (local / collector first gate) and the validate path (relay cloud gate), so the two can
+        never drift in how a clean event becomes a Session. Caller must hold ``self._lock``."""
+        p = payload
+        now = _now()
+        sess = Session(
+            provider=provider,
+            account_alias=p.get("account_alias", "main"),
+            project_alias=p.get("project_alias", "—"),
+            status=p.get("status", "UNKNOWN"),
+            task_label=p.get("task_label", "unknown"),
+            model=p.get("model", "unknown"),
+            session_id=psid or "",
+            started_at=float(started_at_raw or now),
+            updated_at=now,
+            needs_attention=bool(p.get("needs_attention", False)),
+            error_label=p.get("error_label"),
+            display_title=p.get("display_title"),
+        )
+        self.last_collector_heartbeat = now
+        existing = self.sessions.get(sess.key())
+        if existing is not None:
+            # Late events must not resurrect / regress; keep started_at.
+            sess.started_at = existing.started_at
+            sess.pinned = existing.pinned
+            # The title rides on SessionStart/UserPromptSubmit but NOT tool events, so a later
+            # tool event would otherwise blank it — preserve the known title.
+            if sess.display_title is None:
+                sess.display_title = existing.display_title
+        self.sessions[sess.key()] = sess
+        return {"applied": True, "status": sess.status, "scene_key": sess.key()}
 
     def collector_heartbeat(self) -> None:
         with self._lock:
             self.last_collector_heartbeat = _now()
+
+    # Quota windows the device renders (device_frame_api.md → Frame Schema v1).
+    _QUOTA_WINDOW_TYPES = frozenset({"5h", "week"})
 
     def set_quota(
         self,
@@ -315,13 +386,66 @@ class FrameState:
         confidence: str = "unknown",
         is_estimated: bool = True,
     ) -> None:
+        """The SINGLE quota sink (DRY/SOLID chokepoint, 2026-06-03 hardening).
+
+        ``account_alias`` + ``provider`` are written STRAIGHT into the materialized frame
+        (``frame.quota[].account``) served to the device, so this sink VALIDATES + REJECTS
+        (never coerces / clamps) a non-canonical value — BOTH ``/admin/quota`` and the relay
+        path funnel through here, so neither can put ``/Users/.../secret`` or a plan tier on the
+        device. The relay path additionally pre-validates via ``validate.validate_quota_event``
+        (the cloud's independent gate), but THIS is the last-line backstop both paths share.
+
+        Reject (raise ``S.SanitizationError``):
+          * ``account_alias`` not positively neutral OR carrying a forbidden pattern,
+          * ``provider`` not in :data:`sanitize.PROVIDER_ENUM`,
+          * ``window_type`` not in ``{"5h", "week"}``,
+          * ``used_ratio`` a bool / non-numeric / non-finite / outside ``0..1``,
+          * ``confidence`` (when given) not in :data:`sanitize.CONFIDENCE_ENUM`.
+        """
+        import math
+
+        # account_alias: forbidden-pattern clean AND positively neutral (no /Users/, /tmp/, ~,
+        # plan tier, path/email/key smuggled in). Never coerce — a non-neutral value rejects.
+        account_alias = str(account_alias)
+        S.assert_clean(account_alias)
+        if not S.looks_like_neutral_alias(account_alias):
+            raise S.SanitizationError("alias_shape:account_alias")
+
+        # provider enum (raises provider_not_in_enum).
+        provider = S.normalize_provider(provider)
+
+        # window_type enum.
+        window_type = str(window_type)
+        if window_type not in self._QUOTA_WINDOW_TYPES:
+            raise S.SanitizationError("enum:window_type")
+
+        # used_ratio: a finite float in [0, 1]. Reject bool BEFORE float() — float(True)==1.0
+        # would otherwise silently coerce a boolean into a ratio (TS rejects bools → a parity
+        # divergence). NaN / inf / out-of-range reject (never clamp — a raw out-of-range value
+        # means a buggy/hostile collector).
+        if isinstance(used_ratio, bool):
+            raise S.SanitizationError("quota_used_ratio_not_float")
+        try:
+            ratio = float(used_ratio)
+        except (TypeError, ValueError):
+            raise S.SanitizationError("quota_used_ratio_not_float")
+        if not math.isfinite(ratio) or ratio < 0.0 or ratio > 1.0:
+            raise S.SanitizationError("quota_used_ratio_out_of_range")
+
+        # confidence enum-if-present (normalize_confidence maps unknown → "unknown"; but a
+        # caller-supplied non-enum string is a signal of a bad event — reject rather than
+        # silently downgrade to "unknown", matching validate_quota_event's strict enum gate).
+        conf = str(confidence).strip().lower()
+        if conf not in S.CONFIDENCE_ENUM:
+            raise S.SanitizationError("enum:confidence")
+
         with self._lock:
             q = QuotaWindow(
-                provider=S.normalize_provider(provider),
+                provider=provider,
                 account_alias=account_alias,
                 window_type=window_type,
-                used_ratio=max(0.0, min(1.0, float(used_ratio))),
-                confidence=S.normalize_confidence(confidence),
+                used_ratio=ratio,
+                confidence=conf,
                 is_estimated=bool(is_estimated),
                 updated_at=_now(),
             )
@@ -490,7 +614,7 @@ class FrameState:
         # they are simply a calm idle. Partition into LIVE sessions (still fresh) and
         # the actively-working subset.
         live = [(s, e, sc) for (s, e, sc) in ordered if e not in ("OFFLINE", "STALE")]
-        active = [(s, e, sc) for (s, e, sc) in live if e not in ("IDLE", "DONE", "UNKNOWN")]
+        active = [(s, e, sc) for (s, e, sc) in ordered if _is_active(e)]
 
         # Several agents working at once → a STABLE fleet overview ("AGENTS",
         # grouped by project) instead of a single focus that flickers between
@@ -519,24 +643,37 @@ class FrameState:
             "provider": PROVIDER_DISPLAY.get(s.provider, s.provider.title()),
             "account": s.account_alias,
             "status": eff,
-            "project": s.project_alias,
+            "project": _display_label(s),
             "task": s.task_label,
         }
 
     def _fleet_block(self, ordered: list[tuple[Session, str, int]]) -> list[dict]:
-        """Aggregate sessions per (provider, status) into fleet rows; ≤ 6,
+        """Aggregate **active** sessions per project into fleet rows; ≤ 6,
         truncate lowest priority, overflow implied by ``fleet_more`` if present.
 
         The frame's ``fleet`` is a list of ``{provider, count, status}`` rows
-        (device_frame_api.md schema example)."""
-        # Group by PROJECT (the readable label). For an owner running many agents
-        # the useful axis is "which project, how many, doing what" — not provider
-        # (usually all Claude). Each row's left label is "<project> xN" (when N>1)
-        # so the device renders it directly; the row's status is the group's
-        # highest-priority one (so a WAITING/ERROR agent surfaces in the row).
+        (device_frame_api.md schema example).
+
+        Count semantics (R2/TASK-010): ``count`` is the number of **active** agents
+        in the project (``_is_active`` — not idle/done/unknown/stale/offline), so the
+        number matches "how many are busy", never total-present. A project with zero
+        active agents drops off the fleet entirely (the fleet answers "who is busy",
+        and the all-idle case is handled by the calm sleep scene). The row's status
+        is the highest-priority status **among the project's active sessions**.
+
+        Label (R3/TASK-011): ``provider`` is the CLEAN project label with NO baked
+        ``xN`` suffix — the count rides in the structured ``count`` field and the
+        device renders it as a separate badge. (Baking ``xN`` into the string both
+        polluted the 16-byte device buffer for long names and double-printed the
+        count in the simulator.)"""
+        # Group by display label = session title when named, else project (R4/TASK-012):
+        # named sessions surface as their own row, unnamed ones aggregate by project. For an
+        # owner running many agents the useful axis is "which work, how many busy, doing what".
         groups: dict[str, dict] = {}
         for s, eff, score in ordered:
-            key = s.project_alias or "—"
+            if not _is_active(eff):
+                continue
+            key = _display_label(s)
             g = groups.get(key)
             if g is None:
                 groups[key] = {"project": key, "status": eff, "count": 1, "score": score}
@@ -544,17 +681,20 @@ class FrameState:
                 g["count"] += 1
                 if score > g["score"]:
                     g["score"], g["status"] = score, eff
+        # Cap at 5 — the device renders exactly 5 fleet rows, so the WIRE cap equals the
+        # render cap (no row is ever transmitted-but-invisible, and the "5" lives in one
+        # place rather than drifting against a separate server "6").
         rows = sorted(groups.values(), key=lambda r: r["score"], reverse=True)
-        capped = rows[:6]
-        overflow = sum(r["count"] for r in rows[6:])
-        out = []
-        for r in capped:
-            label = f"{r['project']} x{r['count']}" if r["count"] > 1 else r["project"]
-            out.append({"provider": label, "count": r["count"], "status": r["status"]})
+        capped = rows[:FLEET_MAX_ROWS]
+        overflow = sum(r["count"] for r in rows[FLEET_MAX_ROWS:])
+        out = [
+            {"provider": r["project"], "count": r["count"], "status": r["status"]}
+            for r in capped
+        ]
         # Surface the overflow as the top-level ``fleet_more`` count (a documented
         # optional v1 frame key — device_frame_api.md → Array Caps + Frame Schema).
         # build_frame()/_enforce_byte_cap() attach it from this pending value.
-        self._pending_fleet_more = overflow if overflow else 0  # type: ignore[attr-defined]
+        self._pending_fleet_more = overflow if overflow else 0
         return out
 
     def _top_quota(self, now: float) -> list[AccountQuota]:

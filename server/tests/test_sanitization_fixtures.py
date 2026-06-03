@@ -277,6 +277,28 @@ def test_codebody_density_rejected(aliases, pepper):
 
 
 # --------------------------------------------------------------------------- #
+# Case-insensitive bearer/cookie leak — HARDCODED, CORPUS-INDEPENDENT assertion.
+#
+# A reviewer proved a corpus co-drift hole: dropping `re.IGNORECASE` from sanitize.py's
+# `\bBearer\s` / `\bCookie:` patterns AND regenerating the parity corpus makes BOTH the
+# Python and TS parity suites pass while a real LOWERCASE leak (`bearer abc` / `cookie: x`)
+# ships. The corpus moves with the code, so it cannot guard against this regression.
+#
+# This test reads NO fixture. It asserts directly against the live `contains_forbidden` with
+# LITERAL lowercase strings, so removing `re.IGNORECASE` fails HERE regardless of any corpus
+# regeneration. (Mirrored on the TS side in src/cloud/test/validate.test.ts.)
+# --------------------------------------------------------------------------- #
+def test_lowercase_bearer_cookie_rejected_corpus_independent():
+    # bearer <token> (lowercase) — IGNORECASE must keep `\bBearer\s` matching it.
+    assert S.contains_forbidden("bearer abc") is not None
+    # cookie: <value> (lowercase) — IGNORECASE must keep `\bCookie:` matching it.
+    assert S.contains_forbidden("cookie: secret") is not None
+    # Mixed/upper-case still rejected (sanity — these are caught even without IGNORECASE).
+    assert S.contains_forbidden("Bearer abc") is not None
+    assert S.contains_forbidden("Cookie: secret") is not None
+
+
+# --------------------------------------------------------------------------- #
 # Alias default-deny on the EVENT-PIPELINE emit path (not just project_alias()).
 # Regression for the review finding: sanitize_event() previously emitted
 # project_alias/account_alias verbatim after only forbidden-pattern + weak
@@ -334,3 +356,48 @@ def _envelope(payload: dict) -> dict:
         "event_time": 1716900398,
         "payload": dict(payload),
     }
+
+
+# --------------------------------------------------------------------------- #
+# safe_title separator-injection resistance (R4/TASK-012 leak-review, 2026-06-02).
+# A reviewer defeated the pre-normalization forbidden scan by hiding a token behind a
+# separator that normalization then collapsed back into a '-', reconstructing the secret.
+# These lock the fix: zero-width/control reject, '/\@' hard-reject, raw+normalized scan.
+# --------------------------------------------------------------------------- #
+_TITLE_ATTACKS = [
+    "sk​-LIVEKEY1234567890ab",   # zero-width space defeats sk-[A-Za-z0-9]
+    "sk -abc123def",                   # plain space, reconstructed on normalize
+    "sk.LIVEKEY1234",                  # dot reconstruction
+    "sk_LIVEKEY1234",                  # underscore reconstruction
+    "sk -KEY12345",               # NBSP injection
+    "john@exam​ple.com",          # zero-width email
+    "john@example.com",                # plain email (@ hard-reject)
+    "Users/bob/topsecret",             # relative path (/ hard-reject — no leading slash)
+    "C:\\Temp\\secret",                # windows path (\\ hard-reject)
+    "Bearer sometoken123",             # bearer header
+    "../../etc/passwd",                # traversal
+]
+
+
+@pytest.mark.parametrize("attack", _TITLE_ATTACKS)
+def test_safe_title_drops_injection_attacks_local(attack):
+    """Even in LOCAL display mode (the readable path), an injected/forbidden title must be
+    DROPPED to None — never reconstructed into a readable label."""
+    assert S.safe_title(attack, TEST_PEPPER, display=True) is None
+
+
+@pytest.mark.parametrize("title,expected", [
+    ("auth refactor", "auth-refactor"),
+    ("RAG Pipeline v2", "rag-pipeline-v2"),
+    ("fix: the bug", "fix-the-bug"),   # colon is allowed (not a path/email marker)
+    ("v2-rewrite", "v2-rewrite"),
+])
+def test_safe_title_keeps_legit_local(title, expected):
+    assert S.safe_title(title, TEST_PEPPER, display=True) == expected
+
+
+@pytest.mark.parametrize("attack", _TITLE_ATTACKS)
+def test_safe_title_never_readable_in_relay(attack):
+    """Relay mode must never emit a readable title — drop or HMAC-collapse only."""
+    out = S.safe_title(attack, TEST_PEPPER, display=False)
+    assert out is None or out.startswith("title-")

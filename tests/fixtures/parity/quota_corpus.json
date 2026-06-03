@@ -1,0 +1,240 @@
+[
+  {
+    "name": "accept_neutral_5h",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "main",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 0.95,
+        "is_estimated": true
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "accept_neutral_week",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "work",
+      "payload": {
+        "window_type": "week",
+        "used_ratio": 0.3,
+        "is_estimated": true,
+        "confidence": "medium"
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "accept_hmac_account",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "codex",
+      "account_alias": "account-7f3a",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 0.0,
+        "is_estimated": true
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "accept_ratio_one",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "main",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 1.0,
+        "is_estimated": true
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "reject_path_account",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "/Users/hulu/secret-project",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 0.5,
+        "is_estimated": true
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:/Users/"
+  },
+  {
+    "name": "reject_tmp_path_account",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "/tmp/secret",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 0.5,
+        "is_estimated": true
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:/[A-Za-z0-9._-]+/"
+  },
+  {
+    "name": "reject_tilde_home_account",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "~/secret",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 0.5,
+        "is_estimated": true
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:^\\s*~"
+  },
+  {
+    "name": "reject_etc_passwd_account",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "/etc/passwd",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 0.5,
+        "is_estimated": true
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:/[A-Za-z0-9._-]+/"
+  },
+  {
+    "name": "reject_plan_tier_account",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "Max",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 0.5,
+        "is_estimated": true
+      }
+    },
+    "expect": "rejected",
+    "reason": "plan_tier:max"
+  },
+  {
+    "name": "reject_nonenum_provider",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "gpt5",
+      "account_alias": "main",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 0.5,
+        "is_estimated": true
+      }
+    },
+    "expect": "rejected",
+    "reason": "provider_not_in_enum"
+  },
+  {
+    "name": "reject_used_ratio_string",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "main",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": "x",
+        "is_estimated": true
+      }
+    },
+    "expect": "rejected",
+    "reason": "quota_used_ratio_not_float"
+  },
+  {
+    "name": "reject_used_ratio_out_of_range",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "main",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 1.5,
+        "is_estimated": true
+      }
+    },
+    "expect": "rejected",
+    "reason": "quota_used_ratio_out_of_range"
+  },
+  {
+    "name": "reject_used_ratio_bool",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "main",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": true,
+        "is_estimated": true
+      }
+    },
+    "expect": "rejected",
+    "reason": "quota_used_ratio_not_float"
+  },
+  {
+    "name": "reject_bad_window_type",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "main",
+      "payload": {
+        "window_type": "daily",
+        "used_ratio": 0.5,
+        "is_estimated": true
+      }
+    },
+    "expect": "rejected",
+    "reason": "enum:window_type"
+  },
+  {
+    "name": "reject_nonenum_confidence",
+    "event": {
+      "event_id": "q1",
+      "event_type": "quota.window",
+      "provider": "claude",
+      "account_alias": "main",
+      "payload": {
+        "window_type": "5h",
+        "used_ratio": 0.5,
+        "is_estimated": true,
+        "confidence": "super"
+      }
+    },
+    "expect": "rejected",
+    "reason": "enum:confidence"
+  }
+]

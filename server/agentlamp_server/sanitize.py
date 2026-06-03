@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 # --------------------------------------------------------------------------- #
@@ -134,11 +135,32 @@ _MODEL_ID_RE = re.compile(
 )
 
 # Forbidden substrings / regexes scanned over every leaf string value.
+#
+# Generic-path defense (2026-06-03 hardening): the original scan only caught the
+# Mac/Linux *home* roots (`/Users/`, `/home/`), Windows drives (`C:\`), and the
+# relative `./` `../` runs — so `/tmp/secret`, `~/secret`, `/etc/passwd`, `/var/…`,
+# `/opt/…` and a bare absolute POSIX path slipped through into a leaf-scanned field
+# (e.g. quota `account_alias`, `provider_event_name`) and onto the device verbatim.
+# Two new patterns close that:
+#   * ``_ABS_POSIX_PATH_RE`` — a real absolute POSIX path: a leading ``/`` followed by a
+#     filename-segment char then at least one more ``/segment``  (``/etc/passwd``,
+#     ``/tmp/secret``, ``/var/run/x``). A LONE ``/`` or a trailing-slash root (``/``) does
+#     not match, so the em-dash ``—`` placeholder and neutral aliases stay clean. There is
+#     no ``/`` in ``project-a`` / ``hmac:abc123def456`` / ``account-7f3a`` at all, so the
+#     positive neutral-alias shapes never false-positive.
+#   * ``_TILDE_HOME_RE`` — a leading ``~`` home reference (``~/secret``, ``~root/x``, or a
+#     bare ``~``). Anchored at start (after optional whitespace) so an inner ``~`` inside a
+#     longer benign token is not caught; a leading tilde is only ever a home path here.
+_ABS_POSIX_PATH_RE = re.compile(r"/[A-Za-z0-9._-]+/")     # /etc/…  /tmp/…  /var/run/…
+_TILDE_HOME_RE = re.compile(r"^\s*~")                     # ~/secret  ~root/x  ~
+
 _FORBIDDEN_PATTERNS = (
     re.compile(r"/Users/"),
     re.compile(r"/home/"),
     re.compile(r"\b[A-Za-z]:\\"),                 # C:\  D:\
     re.compile(r"(?:\./|\.\./)"),                 # ./src  ../
+    _ABS_POSIX_PATH_RE,                            # /etc/passwd  /tmp/secret  /var/… /opt/…
+    _TILDE_HOME_RE,                                # leading ~ (tilde home)
     re.compile(r"https?://"),
     re.compile(r"\bgit@"),
     re.compile(r"ssh://"),
@@ -194,6 +216,45 @@ def looks_like_neutral_alias(value: str) -> bool:
     return _ALIAS_SHAPE_RE.match(value) is not None
 
 
+# --------------------------------------------------------------------------- #
+# Session-id opaque shape gate (2026-06-03 hardening).
+# `provider_session_id` becomes the materialized SESSION KEY (state.Session.key) and is
+# leaf-scanned but was NOT shape-gated — so free text ("please fix auth now") survived into
+# stored state as the session key. The collector ALWAYS emits the canonical ``hmac:<hex>``
+# label (`session_label`); the cloud gate must REJECT anything that is not that canonical
+# label or an equivalently-opaque high-entropy token (never human-readable free text).
+# --------------------------------------------------------------------------- #
+SESSION_ID_MAX_LEN = 80
+# Canonical collector output: the ``hmac:`` keyed label (``session_label`` → ``hmac:`` + hex).
+# We accept ``hmac:`` + lowercase alnum (the SAME charset the neutral-alias `hmac:` branch in
+# ``_ALIAS_SHAPE_RE`` accepts) so the gate stays consistent with the existing opaque-label
+# convention — the `hmac:` prefix is itself the canonical "this is a keyed opaque id" signal.
+_SESSION_HMAC_RE = re.compile(r"^hmac:[a-z0-9]+$")
+# A high-entropy opaque token fallback (for a collector that mints a non-`hmac:`-prefixed id):
+# ≥ 16 chars of url-safe-base64 / hex alphabet, and NOT a low-entropy kebab phrase. We require
+# BOTH (a) the charset and length AND (b) it contains a digit (free-text English session names
+# like ``fix-the-login-bug`` have no digits and are rejected). Intentionally strict — a
+# non-canonical id means a buggy/hostile collector.
+_SESSION_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,}$")
+_HAS_DIGIT_RE = re.compile(r"[0-9]")
+# A space (or any whitespace) is an instant reject — free text, never an opaque id.
+_WHITESPACE_RE = re.compile(r"\s")
+
+
+def looks_like_session_id(value: str) -> bool:
+    """True iff ``value`` is a canonical opaque session id: the collector's ``hmac:<hex>``
+    label, OR a high-entropy url-safe token (≥ 20 chars, contains a digit, no whitespace).
+    Rejects free text used as a session key (``please fix auth now`` / ``fix-the-login-bug``).
+    Default-deny: a non-opaque id means a buggy/hostile collector; the event is dropped."""
+    if not value or len(value) > SESSION_ID_MAX_LEN:
+        return False
+    if _WHITESPACE_RE.search(value):
+        return False
+    if _SESSION_HMAC_RE.match(value):
+        return True
+    return bool(_SESSION_TOKEN_RE.match(value) and _HAS_DIGIT_RE.search(value))
+
+
 # Readable display label for LOCAL single-owner mode: lowercase alnum with single
 # ``-``/``_`` separators, any number of segments, bounded length (``ai-center``,
 # ``moza-perception-analysis``). Allowed verbatim ONLY when the caller passes
@@ -222,6 +283,53 @@ def coerce_alias(value: str, pepper: bytes, *, prefix: str, n: int = 6, display:
     if display and looks_like_display_label(value):
         return value
     return f"{prefix}-{hmac_label(pepper, value, n=n)}"
+
+
+# A session title is the ONE free-text per-session field the operator controls
+# (Claude `--name` / `/rename` → `session_title`). It is bounded shorter than a
+# folder alias because it shares the ~60px fleet label cell on the orb.
+TITLE_MAX_LEN = 28
+_TITLE_CLEAN_RE = re.compile(r"[^a-z0-9]+")
+# Structural chars that never belong in a short session title and whose adjacency the
+# kebab-normalization would ERASE (hiding a path / email / scheme) — hard-drop on sight.
+_TITLE_HARD_REJECT = frozenset("/\\@")
+
+
+def safe_title(raw: object, pepper: bytes, *, display: bool = False) -> str | None:
+    """Sanitize a user session title into a safe display label, or ``None`` to drop it.
+
+    The title is arbitrary user text and is the ONE field exempted from the leaf scan, so it
+    is hardened against separator-injection (a reviewer defeat: ``sk​-KEY`` /
+    ``sk -KEY`` / ``sk.KEY`` bypass the adjacency patterns, then normalization reconstructs
+    the token). Defenses, in order — any failure drops to ``None`` (caller uses the project):
+      1. NFKC-fold; reject if it contains any zero-width / control / format char (Cc/Cf) — an
+         invisible separator is an injection attempt, never a real title;
+      2. hard-reject ``/`` ``\\`` ``@`` (path / email / scheme markers normalization would erase);
+      3. forbidden-pattern scan on the RAW (now also invisibles-stripped via contains_forbidden);
+      4. normalize to a bounded lowercase kebab;
+      5. RE-scan the normalized label — catches a token reconstructed when a benign separator
+         (space/``.``/``_``) collapsed back into a ``-`` (``sk -KEY`` → ``sk-key``);
+      6. LOCAL mode (``display=True``) → readable verbatim; RELAY → ``title-<hmac>``.
+    The returned value is always a clean shape, safe despite the leaf-scan exemption.
+    """
+    if not isinstance(raw, str):
+        return None
+    raw = unicodedata.normalize("NFKC", raw).strip()
+    if not raw:
+        return None
+    if any(unicodedata.category(ch) in ("Cc", "Cf") for ch in raw):
+        return None
+    if any(ch in _TITLE_HARD_REJECT for ch in raw):
+        return None
+    if contains_forbidden(raw) is not None:
+        return None
+    lab = _TITLE_CLEAN_RE.sub("-", raw.lower()).strip("-_")
+    lab = re.sub(r"-{2,}", "-", lab)[:TITLE_MAX_LEN].strip("-_")
+    if not lab or contains_forbidden(lab) is not None:
+        return None
+    if display and looks_like_display_label(lab):
+        return lab
+    return f"title-{hmac_label(pepper, raw, n=6)}"
 
 
 class SanitizationError(Exception):
@@ -304,8 +412,16 @@ def load_alias_map(path: str) -> AliasMap:
 # --------------------------------------------------------------------------- #
 # Leaf-value forbidden-pattern scan.
 # --------------------------------------------------------------------------- #
-def contains_forbidden(value: str) -> str | None:
-    """Return the name of the first forbidden pattern matched, else None."""
+def _strip_invisibles(value: str) -> str:
+    """NFKC-fold + drop zero-width / control / format chars (Unicode categories Cc, Cf).
+    A leak can otherwise be smuggled past the adjacency-based forbidden patterns by inserting
+    an INVISIBLE separator between their anchor tokens — e.g. ``sk​-KEY`` (zero-width
+    space) defeats ``sk-[A-Za-z0-9]``. Used for SCANNING ONLY; emitted values are unchanged."""
+    folded = unicodedata.normalize("NFKC", value)
+    return "".join(ch for ch in folded if unicodedata.category(ch) not in ("Cc", "Cf"))
+
+
+def _forbidden_in(value: str) -> str | None:
     for pat in _FORBIDDEN_PATTERNS:
         if pat.search(value):
             return f"forbidden:{pat.pattern[:24]}"
@@ -320,6 +436,19 @@ def contains_forbidden(value: str) -> str | None:
     # Code-density: 2+ of { } ; or a newline = a source snippet (leak channel).
     if len(_CODE_DENSITY_RE.findall(value)) >= 2 or "\n" in value:
         return "code_density"
+    return None
+
+
+def contains_forbidden(value: str) -> str | None:
+    """Return the name of the first forbidden pattern matched, else None. Scans BOTH the raw
+    value AND an invisibles-stripped copy, so a forbidden token hidden behind a zero-width /
+    control char (``sk​-…``, ``/Use​rs/…``) can't slip past the adjacency patterns."""
+    hit = _forbidden_in(value)
+    if hit is not None:
+        return hit
+    stripped = _strip_invisibles(value)
+    if stripped != value:
+        return _forbidden_in(stripped)
     return None
 
 
@@ -560,6 +689,7 @@ _KNOWN_PAYLOAD_KEYS = {
     "task_label",
     "project_alias",
     "account_alias",
+    "session_title",
     "model",
     "error_label",
     "confidence",
@@ -635,8 +765,11 @@ def sanitize_event(
     #    Exception: `payload.model` legitimately COLLAPSES a real model id to the
     #    provider enum (policy: "Collapse to the provider enum"), so a model id
     #    there must not reject the whole event. Every other field is scanned.
+    # `model` and `session_title` are exempted from the raw leaf scan because each has a
+    # dedicated coercion below (model→provider enum; session_title→safe_title, which drops
+    # any forbidden-pattern title itself). Every other field is scanned.
     scan_view = {k: v for k, v in event.items() if k != "payload"}
-    scan_payload = {k: v for k, v in payload.items() if k != "model"}
+    scan_payload = {k: v for k, v in payload.items() if k not in ("model", "session_title")}
     _scan_leaves(scan_view, ph)
     _scan_leaves(scan_payload, ph)
 
@@ -691,12 +824,32 @@ def sanitize_event(
         if looks_like_prompt(aa):
             raise SanitizationError("account_alias_prompt_like", ph)
         sp["account_alias"] = coerce_alias(aa, pepper, prefix="account", n=4)
+    # Optional per-session display title (Claude `--name` / `/rename`). safe_title drops a
+    # forbidden/empty title to None (caller falls back to the project label); local mode
+    # keeps it readable, relay mode HMAC-collapses it.
+    if payload.get("session_title") is not None:
+        t = safe_title(payload.get("session_title"), pepper, display=local_display)
+        if t is not None:
+            sp["display_title"] = t
+
+    # provider_session_id becomes the materialized SESSION KEY downstream. It is the ONE
+    # envelope id the operator's tooling can set to free text, so the sanitizer (the only
+    # transform) GUARANTEES it is HMAC-labelled: a value that is already the canonical opaque
+    # shape (`hmac:<hex>` / high-entropy token) rides through; anything else (free text such as
+    # "please fix auth now", or the admin shorthand's `hmac:claude-main-x` default) is collapsed
+    # to a keyed `hmac:<hex>` label. Deterministic, so the device sees a stable per-session id.
+    raw_psid = event.get("provider_session_id")
+    if raw_psid is None:
+        out_psid = None
+    else:
+        raw_psid = str(raw_psid)
+        out_psid = raw_psid if looks_like_session_id(raw_psid) else session_label(raw_psid, pepper)
 
     out = {
         "schema_version": int(event.get("schema_version", 1)),
         "provider": provider,
         "provider_event_name": event.get("provider_event_name"),
-        "provider_session_id": event.get("provider_session_id"),
+        "provider_session_id": out_psid,
         "event_time": event.get("event_time"),
         "payload": sp,
         "sanitization": {"policy_version": POLICY_VERSION},

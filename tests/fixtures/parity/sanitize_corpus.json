@@ -1,0 +1,443 @@
+[
+  {
+    "name": "accept_clean_coding",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "model": "claude",
+        "project_alias": "project-a",
+        "account_alias": "main"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "accept_waiting_attention",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "WAITING",
+        "task_label": "waiting",
+        "needs_attention": true,
+        "project_alias": "project-b",
+        "account_alias": "work"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "accept_error_label",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "ERROR",
+        "task_label": "debugging",
+        "error_label": "rate_limit",
+        "project_alias": "project-7f3a9c",
+        "account_alias": "account-1a2b"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "accept_hmac_aliases",
+    "event": {
+      "schema_version": 1,
+      "provider": "codex",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "READING",
+        "task_label": "reading",
+        "model": "codex",
+        "project_alias": "project-7f3a9c",
+        "account_alias": "account-7f3a"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "accept_display_title",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a",
+        "display_title": "title-9f8e7d"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "reject_path_in_project",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "/Users/hulu/secret/path"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:/Users/"
+  },
+  {
+    "name": "reject_unknown_payload_key",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "secrets": "x"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "unknown_field:payload.secrets"
+  },
+  {
+    "name": "reject_forbidden_key_cwd",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "cwd": "/Users/hulu"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden_key:payload.cwd"
+  },
+  {
+    "name": "reject_plan_tier_account",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "account_alias": "Max"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "plan_tier:max"
+  },
+  {
+    "name": "reject_real_model_id",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "model": "claude-opus-4-20250101"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "model_id"
+  },
+  {
+    "name": "reject_nonenum_status",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "coding-hard",
+        "task_label": "implementing"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "enum:status"
+  },
+  {
+    "name": "reject_bearer_in_title",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a",
+        "display_title": "Bearer sk-abc123"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:sk-[A-Za-z0-9]"
+  },
+  {
+    "name": "reject_provider_not_enum",
+    "event": {
+      "schema_version": 1,
+      "provider": "gpt5",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "provider_not_in_enum"
+  },
+  {
+    "name": "reject_prompt_like_project",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "please refactor the auth module now"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "alias_shape:project_alias"
+  },
+  {
+    "name": "reject_unknown_envelope_key",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing"
+      },
+      "sanitization": {
+        "policy_version": 1
+      },
+      "extra": "x"
+    },
+    "expect": "rejected",
+    "reason": "unknown_field:event.extra"
+  },
+  {
+    "name": "reject_lowercase_bearer_event_name",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "bearer abc123",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:\\bBearer\\s"
+  },
+  {
+    "name": "reject_lowercase_cookie_event_name",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "cookie: secret",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:\\bCookie:"
+  },
+  {
+    "name": "reject_tmp_path_event_name",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "/tmp/secret",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:/[A-Za-z0-9._-]+/"
+  },
+  {
+    "name": "reject_tilde_home_event_name",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "~/secret",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:^\\s*~"
+  },
+  {
+    "name": "reject_etc_passwd_event_name",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "/etc/passwd",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "forbidden:/[A-Za-z0-9._-]+/"
+  },
+  {
+    "name": "accept_hmac_session_id",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "reject_freetext_session_id",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "please fix auth now",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "session_id_shape"
+  }
+]

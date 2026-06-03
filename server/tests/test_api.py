@@ -115,6 +115,100 @@ def test_admin_quota_drives_alert(client):
     assert f["accent"] == "red"
 
 
+# --------------------------------------------------------------------------- #
+# /admin/quota goes through the SINGLE quota sink (state.set_quota), so the same
+# default-deny gate guards BOTH the relay path AND /admin/quota (docs/devlog/16 I1,
+# 2026-06-03 hardening). Previously /admin/quota wrote a raw account straight to the frame.
+# --------------------------------------------------------------------------- #
+def test_admin_quota_rejects_path_account(client):
+    """A path/forbidden account_alias must be REJECTED (422) by the quota sink — never written
+    into frame.quota[].account served to the device."""
+    r = client.post("/admin/quota", json={"provider": "claude", "account": "/tmp/secret",
+                                           "window_type": "5h", "used_ratio": 0.5})
+    assert r.status_code == 422
+    assert r.json()["rejected"] is True
+    f = client.get("/api/v1/device/orb-01/frame", headers=AUTH).json()
+    assert all(q["account"] != "/tmp/secret" for q in f.get("quota", []))
+
+
+def test_admin_quota_rejects_tilde_and_plan_tier_account(client):
+    for bad in ("~/secret", "/etc/passwd", "Max"):
+        r = client.post("/admin/quota", json={"provider": "claude", "account": bad,
+                                              "window_type": "5h", "used_ratio": 0.5})
+        assert r.status_code == 422, bad
+
+
+def test_admin_quota_rejects_bool_used_ratio(client):
+    """float(True)==1.0 must NOT slip a bool past the sink (parity with the TS gate). The route
+    passes used_ratio RAW so the sink's bool-reject fires."""
+    r = client.post("/admin/quota", json={"provider": "claude", "account": "main",
+                                          "window_type": "5h", "used_ratio": True})
+    assert r.status_code == 422
+    assert r.json()["rejected"] is True
+
+
+def test_admin_quota_rejects_out_of_range_and_bad_window(client):
+    r = client.post("/admin/quota", json={"provider": "claude", "account": "main",
+                                          "window_type": "5h", "used_ratio": 1.5})
+    assert r.status_code == 422
+    r = client.post("/admin/quota", json={"provider": "claude", "account": "main",
+                                          "window_type": "daily", "used_ratio": 0.5})
+    assert r.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# /admin/* LAN access control (2026-06-03 hardening). The local server binds 0.0.0.0;
+# /admin/* is gated to loopback OR a configured AGENTLAMP_LOCAL_ADMIN_TOKEN bearer. The
+# device path (/frame + /pair) is unaffected. TestClient is treated as loopback.
+# --------------------------------------------------------------------------- #
+def test_admin_local_client_allowed(client):
+    """The in-process TestClient (synthetic 'testclient' host) is treated as local → allowed."""
+    r = client.post("/admin/heartbeat")
+    assert r.status_code == 200
+
+
+def test_admin_forbidden_for_non_local_client():
+    """A non-loopback client with no admin token is rejected 403 on /admin/* (but NOT on /frame
+    or /pair)."""
+    from fastapi.testclient import TestClient
+    from agentlamp_server import app as app_mod
+
+    app_mod.app.state.frame = app_mod._build_state()
+    # Drive the app with a routable client host (simulates a LAN peer).
+    c = TestClient(app_mod.app, client=("192.168.1.50", 54321))
+    r = c.post("/admin/heartbeat")
+    assert r.status_code == 403
+    assert r.json() == {"error": "admin_forbidden", "retry": False}
+    # The device-facing routes are NOT gated by this control.
+    rf = c.get("/api/v1/device/orb-01/frame")  # 401 (bad_token), NOT 403 admin_forbidden
+    assert rf.status_code == 401
+    rp = c.post("/api/v1/device/orb-01/pair", json={})  # 400 bad_pairing_code, NOT 403
+    assert rp.status_code == 400
+
+
+def test_admin_token_allows_non_local_client(monkeypatch):
+    """A non-loopback client presenting the configured AGENTLAMP_LOCAL_ADMIN_TOKEN is allowed."""
+    import importlib
+
+    monkeypatch.setenv("AGENTLAMP_LOCAL_ADMIN_TOKEN", "s3cret-admin-token")
+    from agentlamp_server import app as app_mod
+
+    importlib.reload(app_mod)  # re-read LOCAL_ADMIN_TOKEN from env at import time
+    try:
+        from fastapi.testclient import TestClient
+
+        app_mod.app.state.frame = app_mod._build_state()
+        c = TestClient(app_mod.app, client=("192.168.1.50", 54321))
+        # Wrong/absent token → 403.
+        assert c.post("/admin/heartbeat").status_code == 403
+        # Correct token → allowed.
+        r = c.post("/admin/heartbeat", headers={"Authorization": "Bearer s3cret-admin-token"})
+        assert r.status_code == 200
+    finally:
+        monkeypatch.delenv("AGENTLAMP_LOCAL_ADMIN_TOKEN", raising=False)
+        importlib.reload(app_mod)  # restore module state for subsequent tests
+
+
 def test_admin_reset(client):
     client.post("/admin/event", json={"provider": "claude", "account": "work", "status": "CODING", "project": "project-a"})
     r = client.post("/admin/reset")

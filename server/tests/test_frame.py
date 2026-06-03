@@ -181,23 +181,40 @@ def test_frame_under_2kb_with_oversize_primary_alias():
     assert set(frame["primary"].keys()) == PRIMARY_KEYS
 
 
-def test_fleet_capped_to_6_with_overflow_count():
+def test_fleet_capped_to_5_with_overflow_count():
     st = _state()
-    # 8 distinct provider/status groups → > 6 rows → overflow.
+    # 8 distinct ACTIVE projects (all working) → > 5 rows → overflow. Use only active
+    # statuses (no DONE/IDLE, which now drop off; no WAITING/ERROR, which would flip the
+    # scene to alert) so this isolates the fleet cap behaviour.
+    statuses = ["CODING", "READING", "TESTING", "THINKING", "CODING", "READING", "TESTING", "THINKING"]
     for i in range(8):
         _inject(
             st,
             provider=("claude" if i % 2 else "codex"),
             account=f"account-{i:02d}",
-            status=["CODING", "READING", "TESTING", "THINKING", "DONE", "IDLE", "WAITING", "ERROR"][i],
+            status=statuses[i],
             project=f"project-{i:02d}",
         )
     frame = st.build_frame("orb-01")
-    assert len(frame["fleet"]) <= 6
-    # Overflow surfaces the documented optional top-level `fleet_more` count, and
-    # that is the ONLY key beyond the required set (schema exactness, P1).
-    assert "fleet_more" in frame and isinstance(frame["fleet_more"], int) and frame["fleet_more"] > 0
+    # The device renders 5 rows, so the wire cap is 5; the other 3 active agents fold
+    # into fleet_more (exact value — guards against an over/under-count regression).
+    assert len(frame["fleet"]) == 5
+    assert "fleet_more" in frame and frame["fleet_more"] == 3
+    # `fleet_more` is the ONLY key beyond the required set (schema exactness, P1).
     assert set(frame.keys()) == REQUIRED_KEYS | {"fleet_more"}
+
+
+def test_fleet_label_not_truncated_server_side():
+    """R3/TASK-011: the server never clamps a fleet row's project label (only primary
+    string fields get clamped under the 2 KB cap). A long-but-valid label must reach the
+    device verbatim so the firmware can shrink/ellipsize it — the device buffer is sized
+    for ALIAS_MAX_LEN (40), so a server-side cut would silently drop characters first."""
+    st = _state()
+    long_label = "a" * 40  # ALIAS_MAX_LEN — longest a label can legitimately be
+    _inject_sid(st, "hmac:long", project=long_label, status="CODING")
+    _inject_sid(st, "hmac:other", project="other", status="CODING")  # ≥2 active → fleet
+    rows = {r["provider"]: r for r in st.build_frame("orb-01")["fleet"]}
+    assert long_label in rows and len(rows[long_label]["provider"]) == 40
 
 
 def test_quota_capped_to_2_top_risk():
@@ -460,17 +477,20 @@ def test_idle_session_sleeps_not_offline_when_aged(monkeypatch):
 # opaque hash + flickering single focus across same-project sessions).
 # --------------------------------------------------------------------------- #
 def _inject_sid(st, sid, **kw):
+    payload = {
+        "status": kw.get("status", "CODING"),
+        "task_label": "implementing",
+        "project_alias": kw.get("project", "project-a"),
+        "account_alias": "main",
+    }
+    if "session_title" in kw:
+        payload["session_title"] = kw["session_title"]
     ev = {
         "schema_version": 1,
         "provider": kw.get("provider", "claude"),
         "provider_session_id": sid,
         "event_time": 1716900398,
-        "payload": {
-            "status": kw.get("status", "CODING"),
-            "task_label": "implementing",
-            "project_alias": kw.get("project", "project-a"),
-            "account_alias": "main",
-        },
+        "payload": payload,
     }
     st.apply_event(ev)
     st.collector_heartbeat()
@@ -482,6 +502,56 @@ def test_local_display_keeps_readable_multi_segment_label():
     st = _state()  # local_display defaults ON
     _inject_sid(st, "hmac:s1", project="moza-perception-analysis", status="CODING")
     assert st.build_frame("orb-01")["primary"]["project"] == "moza-perception-analysis"
+
+
+# --------------------------------------------------------------------------- #
+# Per-session titles (R4/TASK-012): a named session (claude --name / /rename →
+# session_title) surfaces by its title so same-folder sessions are distinguishable.
+# --------------------------------------------------------------------------- #
+def test_named_session_title_replaces_project_label():
+    st = _state()
+    _inject_sid(st, "hmac:n1", project="ai-center", status="CODING", session_title="auth refactor")
+    assert st.build_frame("orb-01")["primary"]["project"] == "auth-refactor"
+
+
+def test_named_sessions_split_same_folder_into_distinct_fleet_rows():
+    """Two NAMED sessions in the same folder → two distinct rows (by title); an unnamed
+    session in that folder still aggregates under the bare project label."""
+    st = _state()
+    _inject_sid(st, "hmac:a", project="ai-center", status="CODING", session_title="rag pipeline")
+    _inject_sid(st, "hmac:b", project="ai-center", status="TESTING", session_title="fleet fix")
+    _inject_sid(st, "hmac:c", project="ai-center", status="READING")  # unnamed
+    labels = {r["provider"] for r in st.build_frame("orb-01")["fleet"]}
+    assert {"rag-pipeline", "fleet-fix", "ai-center"} <= labels
+
+
+def test_title_preserved_across_events_that_omit_it():
+    """Title rides on SessionStart/UserPromptSubmit but NOT tool events — a later tool
+    event without a title must not blank the session's known title."""
+    st = _state()
+    _inject_sid(st, "hmac:p", project="ai-center", status="THINKING", session_title="my task")
+    _inject_sid(st, "hmac:p", project="ai-center", status="CODING")  # tool event, no title
+    assert st.build_frame("orb-01")["primary"]["project"] == "my-task"
+
+
+def test_unsafe_title_is_dropped_not_cleaned():
+    """A title carrying a path/secret is DROPPED (we never try to 'clean' a leak) → the
+    label falls back to the project. The leak must not survive in any form."""
+    st = _state()
+    _inject_sid(st, "hmac:u", project="ai-center", status="CODING",
+                session_title="/Users/hulu/secrets/key.pem")
+    label = st.build_frame("orb-01")["primary"]["project"]
+    assert label == "ai-center"
+    assert "Users" not in label and "secrets" not in label and "key" not in label
+
+
+def test_title_hmac_collapsed_in_relay_mode():
+    """Relay mode never emits a readable title — it HMAC-collapses to title-<hmac>."""
+    st = _state()
+    st.local_display = False
+    _inject_sid(st, "hmac:r", project="proj", status="CODING", session_title="secret plan name")
+    label = st.build_frame("orb-01")["primary"]["project"]
+    assert label.startswith("title-") and "secret" not in label and "plan" not in label
 
 
 def test_multiple_active_sessions_show_fleet_not_focus():
@@ -501,15 +571,46 @@ def test_single_active_session_is_focus():
 
 
 def test_fleet_groups_by_project_with_count():
-    """Fleet rows group by project and show 'project xN', so a glance maps to which
-    project + how many agents — the core fix for 5 same-folder sessions."""
+    """Fleet rows group by project. The label is the CLEAN project name (no baked
+    'xN') and the count rides in the structured ``count`` field — so a glance maps to
+    which project + how many busy agents (the core fix for 5 same-folder sessions),
+    without polluting the device's 16-byte label buffer (R3/TASK-011)."""
     st = _state()
     for i in range(5):
         _inject_sid(st, f"hmac:c{i}", project="ai-center", status="CODING")
     _inject_sid(st, "hmac:d", project="agentlamp", status="READING")
-    labels = [row["provider"] for row in st.build_frame("orb-01")["fleet"]]
-    assert "ai-center x5" in labels
-    assert "agentlamp" in labels  # count 1 → no suffix
+    rows = {row["provider"]: row for row in st.build_frame("orb-01")["fleet"]}
+    assert "ai-center" in rows and rows["ai-center"]["count"] == 5  # clean label
+    assert " x" not in rows["ai-center"]["provider"]                # NO baked suffix
+    assert "agentlamp" in rows and rows["agentlamp"]["count"] == 1
+
+
+def test_fleet_count_is_active_only_not_total():
+    """R2/TASK-010: the row count = ACTIVE agents in the project, not total-present.
+    5 ai-center sessions where 3 are CODING and 2 are DONE → count 3, not 5."""
+    st = _state()
+    for i in range(3):
+        _inject_sid(st, f"hmac:a{i}", project="ai-center", status="CODING")
+    for i in range(2):
+        _inject_sid(st, f"hmac:d{i}", project="ai-center", status="DONE")
+    # A second active project so the scene is the fleet overview (≥2 active).
+    _inject_sid(st, "hmac:b", project="other", status="CODING")
+    rows = {r["provider"]: r for r in st.build_frame("orb-01")["fleet"]}
+    assert rows["ai-center"]["count"] == 3   # 2 DONE excluded
+    assert rows["ai-center"]["status"] == "CODING"
+
+
+def test_fleet_drops_all_idle_or_done_project():
+    """R2/TASK-010: a project where every session is idle/done has zero active agents
+    and drops off the fleet entirely (the fleet answers 'who is busy')."""
+    st = _state()
+    _inject_sid(st, "hmac:c1", project="active-proj", status="CODING")
+    _inject_sid(st, "hmac:c2", project="active-proj", status="TESTING")
+    _inject_sid(st, "hmac:d1", project="finished-proj", status="DONE")
+    _inject_sid(st, "hmac:d2", project="finished-proj", status="IDLE")
+    labels = [r["provider"] for r in st.build_frame("orb-01")["fleet"]]
+    assert "active-proj" in labels
+    assert "finished-proj" not in labels  # all-idle/done project drops off
 
 
 def test_waiting_still_interrupts_busy_fleet():

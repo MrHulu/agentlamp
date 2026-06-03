@@ -1,0 +1,28 @@
+[
+  {
+    "kid": "k1",
+    "secret_utf8": "test-collector-secret",
+    "collector_id": "collector-mac-main",
+    "method": "POST",
+    "path": "/api/v1/collectors/collector-mac-main/events",
+    "timestamp": 1780000000,
+    "nonce": "abababababababababababababababab",
+    "body_utf8": "{\"hello\":\"world\"}",
+    "payload_sha256": "93a23971a914e5eacbf0a8d25154cda309c3c1c72fbb9914d47c60f3cb681588",
+    "canonical_string": "v1\nPOST\n/api/v1/collectors/collector-mac-main/events\nk1\n1780000000\nabababababababababababababababab\n93a23971a914e5eacbf0a8d25154cda309c3c1c72fbb9914d47c60f3cb681588",
+    "signature": "f245b6a2c218d8ff13c650d8cefdce6538f0a15a622a34a0eee1e1f2c26127b2"
+  },
+  {
+    "kid": "kA",
+    "secret_utf8": "another-secret-0123456789",
+    "collector_id": "laptop-2",
+    "method": "POST",
+    "path": "/api/v1/collectors/laptop-2/events",
+    "timestamp": 1780000123,
+    "nonce": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "body_utf8": "{\"events\":[]}",
+    "payload_sha256": "24de1c4a19c43ad41b013f13dcd858c17b0daa7f33a53f19913e5b11366d1c2e",
+    "canonical_string": "v1\nPOST\n/api/v1/collectors/laptop-2/events\nkA\n1780000123\ncdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\n24de1c4a19c43ad41b013f13dcd858c17b0daa7f33a53f19913e5b11366d1c2e",
+    "signature": "546f7ada4b8e80f1f2fec3281c6a02898393fe684f9ebf3664604bf7e799f206"
+  }
+]

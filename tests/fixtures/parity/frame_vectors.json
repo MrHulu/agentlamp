@@ -1,0 +1,285 @@
+[
+  {
+    "name": "focus_single_coding",
+    "events": [
+      {
+        "kind": "session",
+        "event": {
+          "schema_version": 1,
+          "provider": "claude",
+          "provider_event_name": "SessionStart",
+          "provider_session_id": "hmac:s1",
+          "event_time": 1780000000,
+          "payload": {
+            "status": "CODING",
+            "task_label": "implementing",
+            "project_alias": "project-a",
+            "account_alias": "main",
+            "model": "claude"
+          },
+          "sanitization": {
+            "policy_version": 1
+          }
+        }
+      }
+    ],
+    "expect_frame": {
+      "v": 1,
+      "device_id": "orb-01",
+      "scene": "focus",
+      "headline": "FOCUS",
+      "primary": {
+        "provider": "Claude",
+        "account": "main",
+        "status": "CODING",
+        "project": "project-a",
+        "task": "implementing"
+      },
+      "fleet": [
+        {
+          "provider": "project-a",
+          "count": 1,
+          "status": "CODING"
+        }
+      ],
+      "quota": [],
+      "accent": "purple",
+      "ttl": 5
+    }
+  },
+  {
+    "name": "fleet_two_active",
+    "events": [
+      {
+        "kind": "session",
+        "event": {
+          "schema_version": 1,
+          "provider": "claude",
+          "provider_event_name": "SessionStart",
+          "provider_session_id": "hmac:s1",
+          "event_time": 1780000000,
+          "payload": {
+            "status": "CODING",
+            "task_label": "implementing",
+            "project_alias": "project-a",
+            "account_alias": "main",
+            "model": "claude"
+          },
+          "sanitization": {
+            "policy_version": 1
+          }
+        }
+      },
+      {
+        "kind": "session",
+        "event": {
+          "schema_version": 1,
+          "provider": "codex",
+          "provider_event_name": "SessionStart",
+          "provider_session_id": "hmac:s2",
+          "event_time": 1780000000,
+          "payload": {
+            "status": "TESTING",
+            "task_label": "testing",
+            "project_alias": "project-b",
+            "account_alias": "main",
+            "model": "codex"
+          },
+          "sanitization": {
+            "policy_version": 1
+          }
+        }
+      }
+    ],
+    "expect_frame": {
+      "v": 1,
+      "device_id": "orb-01",
+      "scene": "fleet",
+      "headline": "AGENTS",
+      "primary": {
+        "provider": "Claude",
+        "account": "main",
+        "status": "CODING",
+        "project": "project-a",
+        "task": "implementing"
+      },
+      "fleet": [
+        {
+          "provider": "project-a",
+          "count": 1,
+          "status": "CODING"
+        },
+        {
+          "provider": "project-b",
+          "count": 1,
+          "status": "TESTING"
+        }
+      ],
+      "quota": [],
+      "accent": "purple",
+      "ttl": 5
+    }
+  },
+  {
+    "name": "alert_waiting",
+    "events": [
+      {
+        "kind": "session",
+        "event": {
+          "schema_version": 1,
+          "provider": "claude",
+          "provider_event_name": "SessionStart",
+          "provider_session_id": "hmac:s1",
+          "event_time": 1780000000,
+          "payload": {
+            "status": "WAITING",
+            "task_label": "waiting",
+            "project_alias": "project-a",
+            "account_alias": "main",
+            "model": "claude",
+            "needs_attention": true
+          },
+          "sanitization": {
+            "policy_version": 1
+          }
+        }
+      }
+    ],
+    "expect_frame": {
+      "v": 1,
+      "device_id": "orb-01",
+      "scene": "alert",
+      "headline": "ACTION REQUIRED",
+      "primary": {
+        "provider": "Claude",
+        "account": "main",
+        "status": "WAITING",
+        "project": "project-a",
+        "task": "waiting"
+      },
+      "fleet": [
+        {
+          "provider": "project-a",
+          "count": 1,
+          "status": "WAITING"
+        }
+      ],
+      "quota": [],
+      "accent": "yellow",
+      "ttl": 5
+    }
+  },
+  {
+    "name": "sleep_all_idle",
+    "events": [
+      {
+        "kind": "session",
+        "event": {
+          "schema_version": 1,
+          "provider": "claude",
+          "provider_event_name": "SessionStart",
+          "provider_session_id": "hmac:s1",
+          "event_time": 1780000000,
+          "payload": {
+            "status": "IDLE",
+            "task_label": "idle",
+            "project_alias": "project-a",
+            "account_alias": "main",
+            "model": "claude"
+          },
+          "sanitization": {
+            "policy_version": 1
+          }
+        }
+      }
+    ],
+    "expect_frame": {
+      "v": 1,
+      "device_id": "orb-01",
+      "scene": "sleep",
+      "headline": "SLEEP",
+      "primary": {
+        "provider": "Claude",
+        "account": "main",
+        "status": "IDLE",
+        "project": "project-a",
+        "task": "idle"
+      },
+      "fleet": [],
+      "quota": [],
+      "accent": "muted",
+      "ttl": 5
+    }
+  },
+  {
+    "name": "quota_danger_alert",
+    "events": [
+      {
+        "kind": "session",
+        "event": {
+          "schema_version": 1,
+          "provider": "claude",
+          "provider_event_name": "SessionStart",
+          "provider_session_id": "hmac:s1",
+          "event_time": 1780000000,
+          "payload": {
+            "status": "CODING",
+            "task_label": "implementing",
+            "project_alias": "project-a",
+            "account_alias": "main",
+            "model": "claude"
+          },
+          "sanitization": {
+            "policy_version": 1
+          }
+        }
+      },
+      {
+        "kind": "quota",
+        "event": {
+          "event_id": "q1",
+          "event_type": "quota.window",
+          "provider": "claude",
+          "account_alias": "main",
+          "payload": {
+            "window_type": "5h",
+            "used_ratio": 0.95,
+            "is_estimated": true,
+            "confidence": "medium"
+          }
+        }
+      }
+    ],
+    "expect_frame": {
+      "v": 1,
+      "device_id": "orb-01",
+      "scene": "alert",
+      "headline": "ACTION REQUIRED",
+      "primary": {
+        "provider": "Claude",
+        "account": "main",
+        "status": "CODING",
+        "project": "project-a",
+        "task": "implementing"
+      },
+      "fleet": [
+        {
+          "provider": "project-a",
+          "count": 1,
+          "status": "CODING"
+        }
+      ],
+      "quota": [
+        {
+          "provider": "Claude",
+          "account": "main",
+          "confidence": 2,
+          "estimated": true,
+          "w5": 0.95
+        }
+      ],
+      "accent": "red",
+      "ttl": 5
+    }
+  }
+]

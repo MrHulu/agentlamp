@@ -1,0 +1,186 @@
+{
+  "policy_version": 1,
+  "provider_enum": [
+    "codex",
+    "claude",
+    "manual"
+  ],
+  "model_enum": [
+    "codex",
+    "claude",
+    "manual",
+    "unknown"
+  ],
+  "status_enum": [
+    "IDLE",
+    "THINKING",
+    "CODING",
+    "READING",
+    "TESTING",
+    "WAITING",
+    "DONE",
+    "ERROR",
+    "OFFLINE",
+    "STALE",
+    "UNKNOWN"
+  ],
+  "status_detail_enum": [
+    "compacting",
+    "tool_running",
+    "subagent",
+    "unknown"
+  ],
+  "tool_category_enum": [
+    "read",
+    "edit",
+    "test",
+    "shell",
+    "mcp",
+    "approval",
+    "error"
+  ],
+  "task_label_enum": [
+    "implementing",
+    "debugging",
+    "testing",
+    "reviewing",
+    "refactoring",
+    "reading",
+    "planning",
+    "waiting",
+    "idle",
+    "unknown"
+  ],
+  "error_label_enum": [
+    "rate_limit",
+    "timeout",
+    "permission",
+    "api_error",
+    "tool_error",
+    "network",
+    "unknown"
+  ],
+  "confidence_enum": [
+    "high",
+    "medium",
+    "low",
+    "unknown"
+  ],
+  "validate_envelope_keys": [
+    "event_time",
+    "payload",
+    "provider",
+    "provider_event_name",
+    "provider_session_id",
+    "sanitization",
+    "schema_version"
+  ],
+  "validate_payload_keys": [
+    "account_alias",
+    "confidence",
+    "display_title",
+    "error_label",
+    "model",
+    "needs_attention",
+    "project_alias",
+    "status",
+    "status_detail",
+    "task_label",
+    "tool_category"
+  ],
+  "forbidden_keys": [
+    "command",
+    "content",
+    "cwd",
+    "new_string",
+    "old_string",
+    "prompt",
+    "tool_input",
+    "tool_response",
+    "transcript_path"
+  ],
+  "plan_tiers": [
+    "max",
+    "team",
+    "pro",
+    "plus",
+    "enterprise"
+  ],
+  "alias_max_len": 40,
+  "title_max_len": 28,
+  "alias_shape_regex": "^(?:\u2014|hmac:[a-z0-9]+|[a-z0-9]+(?:-[a-z0-9]+)?)$",
+  "display_label_regex": "^[a-z0-9]+(?:[-_][a-z0-9]+)*$",
+  "model_id_regex": "(claude-(?:opus|sonnet|haiku|instant)|(?:opus|sonnet|haiku)-\\d|gpt-[0-9o]|\\bft:|gemini-\\d|llama-?\\d|\\bo[134]-(?:mini|preview)\\b)",
+  "model_id_ignorecase": true,
+  "session_id_max_len": 80,
+  "session_hmac_regex": "^hmac:[a-z0-9]+$",
+  "session_token_regex": "^[A-Za-z0-9_-]{16,}$",
+  "session_has_digit_regex": "[0-9]",
+  "session_whitespace_regex": "\\s",
+  "forbidden_patterns": [
+    {
+      "pattern": "/Users/",
+      "ignorecase": false
+    },
+    {
+      "pattern": "/home/",
+      "ignorecase": false
+    },
+    {
+      "pattern": "\\b[A-Za-z]:\\\\",
+      "ignorecase": false
+    },
+    {
+      "pattern": "(?:\\./|\\.\\./)",
+      "ignorecase": false
+    },
+    {
+      "pattern": "/[A-Za-z0-9._-]+/",
+      "ignorecase": false
+    },
+    {
+      "pattern": "^\\s*~",
+      "ignorecase": false
+    },
+    {
+      "pattern": "https?://",
+      "ignorecase": false
+    },
+    {
+      "pattern": "\\bgit@",
+      "ignorecase": false
+    },
+    {
+      "pattern": "ssh://",
+      "ignorecase": false
+    },
+    {
+      "pattern": "sk-[A-Za-z0-9]",
+      "ignorecase": false
+    },
+    {
+      "pattern": "\\bBearer\\s",
+      "ignorecase": true
+    },
+    {
+      "pattern": "\\bCookie:",
+      "ignorecase": true
+    },
+    {
+      "pattern": "eyJ[A-Za-z0-9_-]{6,}\\.",
+      "ignorecase": false
+    },
+    {
+      "pattern": "BEGIN [A-Z ]*PRIVATE KEY",
+      "ignorecase": false
+    },
+    {
+      "pattern": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+      "ignorecase": false
+    },
+    {
+      "pattern": "\\bsha256[(:]",
+      "ignorecase": true
+    }
+  ]
+}
