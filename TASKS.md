@@ -86,6 +86,24 @@
 - [ ] TASK-014 (P2): Ops hardening — log rotation, commit launchd plists + runbook (R6).
 - [ ] TASK-015 (P2): Quota/usage on the lamp — a real source beyond manual entry (R7).
 
+## Open-source / public-repo polish (repo went public 2026-06-03 · github.com/MrHulu/agentlamp)
+
+- [ ] TASK-016 (P1): CI — GitHub Actions running the suites on push/PR so the README "tests"
+  badge is real (currently a static badge). Recipe: a **python** job
+  (`pip install -e ".[all]" pytest httpx` → `pytest server/tests/ src/collector/tests/ -q`, ~305
+  tests) + a **cloud** job (`cd src/cloud && npm ci && npx tsc --noEmit && npx vitest run`, 120
+  tests); optionally a firmware `pio run -e waveshare-s3-lcd-147` job. Verify it goes green, then
+  swap the static `tests-425-passing` badge for the live `actions/workflows/ci.yml/badge.svg`.
+- [ ] TASK-017 (P2): `CODE_OF_CONDUCT.md` (Contributor Covenant). LICENSE / SECURITY.md /
+  CONTRIBUTING.md already exist.
+- [ ] TASK-018 (P2): Remove or repurpose the untracked `src/collector/usb_bridge.py` (the rejected
+  USB-cable transport, superseded by the cloud relay — kept out of the repo, still on disk).
+
+> **Relay is DEPLOYED + live** (Cloudflare Worker + Durable Object + KV; end-to-end verified
+> 2026-06-03). The `wrangler login` + `wrangler deploy` step is owner-gated and documented in
+> `docs/cloud/deploy.md`; the live URL + tokens live in `~/.config/agentlamp/relay-deploy.txt`
+> (NOT in the repo). Remaining hardware-gated item: **TASK-011 (R3)** physical-LCD eyeball.
+
 ## Done
 
 - [x] USB-cable transport — the lamp no longer needs WiFi ✅ 2026-06-02
