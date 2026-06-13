@@ -104,6 +104,14 @@ Accept: application/x-pem-file
   (backward-compatible per the unknown-field rule) or render a "+N more" hint.
 - A `quota` entry carries **both** `w5` and `week` for one `(provider, account)`
   when both windows are known; a window with no data is **omitted** (never `null`).
+- `seq` + `server_time` are **per-response volatile**: `seq` is a monotonic counter that bumps
+  only when the rendered content / scene changes; `server_time` is the relay's wall clock at send.
+  Both are emitted on **every** live frame (the local server **and** the cloud relay, in parity),
+  but are **stripped from the static parity goldens** in `tests/fixtures/parity/frame_vectors.json`
+  before comparison — their absence in the fixtures is by design (volatile values can't be pinned),
+  **not** a contract gap. A reader may use `seq` for cheap change-detection; staleness must come
+  from local elapsed time, never `server_time` (a skewed device RTC must not misjudge it — see
+  Device Behavior).
 
 ## Enums
 

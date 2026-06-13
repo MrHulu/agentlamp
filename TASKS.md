@@ -93,7 +93,7 @@
   (`pip install -e ".[all]" pytest httpx` → `pytest server/tests/ src/collector/tests/ -q`, ~305
   tests) + a **cloud** job (`cd src/cloud && npm ci && npx tsc --noEmit && npx vitest run`, 120
   tests); optionally a firmware `pio run -e waveshare-s3-lcd-147` job. Verify it goes green, then
-  swap the static `tests-425-passing` badge for the live `actions/workflows/ci.yml/badge.svg`.
+  swap the static `tests-455-passing` badge for the live `actions/workflows/ci.yml/badge.svg`.
 - [ ] TASK-017 (P2): `CODE_OF_CONDUCT.md` (Contributor Covenant). LICENSE / SECURITY.md /
   CONTRIBUTING.md already exist.
 - [ ] TASK-018 (P2): Remove or repurpose the untracked `src/collector/usb_bridge.py` (the rejected
@@ -103,6 +103,43 @@
 > 2026-06-03). The `wrangler login` + `wrangler deploy` step is owner-gated and documented in
 > `docs/cloud/deploy.md`; the live URL + tokens live in `~/.config/agentlamp/relay-deploy.txt`
 > (NOT in the repo). Remaining hardware-gated item: **TASK-011 (R3)** physical-LCD eyeball.
+
+## Readers & multi-device (2026-06-07) · design-ready, owner-gated to land
+
+> Investigation (devlog 17) confirmed multi-collector fan-in + multi-reader are **既有能力，
+> 零核心改动**. Specs are implementation-ready; landing touches a live daemon + cloud admin →
+> needs owner go. Plan: `docs/plans/2026-06-07-multi-device-cloud-aggregation.md`.
+
+- [ ] TASK-019 (P1): Multi-device cloud aggregation — enroll machine #2 as a distinct collector
+  (unique `collector_id`) + flip each daemon to relay + per-machine `account_alias` to keep
+  machines distinct on the phone. **No cloud/collector code change** (single-DO fan-in already
+  works). Spec: the 2026-06-07 plan §3–§4. Acceptance: plan §5.
+- [~] TASK-020 (P1): iPhone widget reader — IMPLEMENTED + conformance-tested + review-hardened
+  (not yet on-device). `readers/iphone-widget/`: `agentlamp-widget.js` is now the phone-facing
+  **single-file** Scriptable template (white HULU card, Chinese labels, Claude/Codex quota
+  remaining %, plan chips, reset times); `frame-view.js` remains shared pure logic for alerts/tests;
+  tests now include `frame-view.test.cjs` + `widget-template.test.cjs` (**15 zero-dep Node tests**,
+  all green). **2026-06-07 review round**
+  (3 codex + 3 my-subagents, all findings verified): fixed C1 — auth failure (401/403/404) now
+  shows **PAIRING REQUIRED** + drops cache (a revoked phone must not keep rendering last-good
+  data; cache only on 429/5xx/transport); C2 — quota surfaces the **higher-risk** of w5/week
+  (was hiding `week`); fleet `+N more` now recounts rows dropped by the local 3-row cap.
+  Remaining = run on a real phone + capture an on-device screenshot for `readers/`.
+- [~] TASK-021 (P2): instant alerts — IMPLEMENTED (client path) + tested + review-hardened.
+  `agentlamp-alert.js` fires a notification (+ optional Pushcut webhook) on `scene=alert`,
+  deduped via `frame-view.shouldAlert`. **2026-06-07 fixes:** C3 — dedup key now includes
+  `primary.task` (a changed WAITING/ERROR task re-fires; was a 4-reviewer-consensus bug); C4 —
+  the dedup key is persisted **only after** a delivery succeeds (a failed send retries instead
+  of being permanently swallowed); local + webhook deliver independently; a revoked device fires
+  a deduped **re-pair** notice. DEPLOY.md now documents the real iOS Shortcuts scheduling limit
+  (no built-in N-minute trigger → Pushcut Automation Server / staggered automations / Worker-cron).
+  Remaining = schedule on a real phone. Server-side Worker-cron variant owner-gated (relay I1–I5).
+- [x] TASK-022: collector CLI admin-freshness fix ✅ 2026-06-07 — `agentlamp enroll` / `revoke`
+  hit the relay's `/admin` routes, but `_admin_post` sent only the bearer; the DO's
+  `checkAdminReplay` (devlog/16) **requires** a fresh `X-ACO-Timestamp` (±300s) + single-use
+  `X-ACO-Nonce`, so live enroll/revoke would 401 `admin_stale`. Fixed `_admin_post` to mint +
+  send both; tightened the test stub to mirror `checkAdminReplay` (so this class of bug can't
+  hide again) + assert fresh-nonce-per-call. Found by the 2026-06-07 codex review (D4).
 
 ## Done
 

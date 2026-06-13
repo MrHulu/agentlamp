@@ -14,7 +14,7 @@ A small screen on your desk: live, quiet, privacy-first.
 ![platform](https://img.shields.io/badge/platform-ESP32--S3-2b6cb0)
 ![license](https://img.shields.io/badge/license-MIT-3a9d3a)
 ![privacy](https://img.shields.io/badge/privacy-default--deny-d97706)
-![tests](https://img.shields.io/badge/tests-425%20passing-2ea44f)
+![tests](https://img.shields.io/badge/tests-455%20passing-2ea44f)
 ![self-host](https://img.shields.io/badge/self--host-single--owner-6b7280)
 
 </div>
@@ -95,7 +95,7 @@ cd firmware && pio run -e waveshare-s3-lcd-147 -t upload
 ## 🧭 Status
 
 Local mode works; the cloud relay is implemented and **deployed + end-to-end verified live**
-(Cloudflare Worker + Durable Object + KV). **425 automated tests pass** (Python 305 + TypeScript 120),
+(Cloudflare Worker + Durable Object + KV). **455 automated tests pass** (Python 315 + TypeScript 125 + iPhone reader 15),
 with cross-language consistency locked by a generated parity corpus.
 Design + evolution notes: [`docs/devlog/`](docs/devlog/).
 

@@ -77,14 +77,17 @@ route — so you do **not** need to pre-provision anything per machine. (You *ma
 
 ```sh
 # from the repo root, after cloning/pulling the collector onto the new machine.
-# --relay-host defaults to $AGENTLAMP_RELAY_HOST (the FULL https URL); --kid + --secret are
-# required (enroll does not generate them). Pass the admin token so step 6 can register the
-# kid with the live DO registry (no `wrangler deploy`).
+# --relay-host defaults to $AGENTLAMP_RELAY_HOST (the FULL https URL). With no --kid/--secret,
+# enroll mints a fresh kid + high-entropy secret and registers it with the live DO registry
+# (no `wrangler deploy`). Keep AGENTLAMP_ACCOUNT distinct per machine if the phone should
+# show which computer a session is running on.
+export AGENTLAMP_ACCOUNT="laptop-2"
 agentlamp enroll \
     --relay-host "$AGENTLAMP_RELAY_HOST" \
     --collector-id laptop-2 \
-    --kid k7 --secret "<collector-secret>" \
-    --admin-token "$AGENTLAMP_ADMIN_TOKEN"
+    --write-claude ~/.claude/settings.json \
+    --write-codex ~/.codex/config.toml \
+    --admin-token-stdin <<<"$AGENTLAMP_ADMIN_TOKEN"
 ```
 
 ### Step 2 — source the env enroll wrote (so the daemon inherits the relay config)
@@ -113,10 +116,10 @@ agentlamp revoke --kid k7 --admin-token "$AGENTLAMP_ADMIN_TOKEN"
 
 ### What enroll does NOT do (and why that's correct)
 
-- It does **not** generate or copy a `kid` / `secret`. You provide the pair; each computer
-  uses its **own** `kid` and its **own** local pepper — so revoking one machine never
-  affects the others, and the relay operator can never link two machines by a shared
-  secret.
+- It does **not** reuse another computer's `kid` / `secret` unless you explicitly pass them.
+  By default it mints a fresh pair; each computer uses its **own** `kid` and its **own**
+  local pepper — so revoking one machine never affects the others, and the relay operator
+  can never link two machines by a shared secret.
 - It does **not** start the daemon. Configuration (step 1) and running (step 3) are
   separate — `agentlamp status` shows OK after step 1, but nothing pushes until the daemon
   runs.
@@ -217,7 +220,7 @@ the orb once so it re-runs NTP-before-TLS and refreshes its pinned root bundle.
 
 | You want to | Run | Touches device? | Touches relay deploy? |
 |-------------|-----|-----------------|-----------------------|
-| Use a new computer | `agentlamp enroll --relay-host "$AGENTLAMP_RELAY_HOST" --kid <kid> --secret <s> --admin-token "$AGENTLAMP_ADMIN_TOKEN"`, then source `relay.env` + start the daemon | no | no |
+| Use a new computer | `AGENTLAMP_ACCOUNT=<alias> agentlamp enroll --relay-host "$AGENTLAMP_RELAY_HOST" --collector-id <alias> --admin-token-stdin`, then start the daemon with the same `AGENTLAMP_ACCOUNT` | no | no |
 | Stop an old computer | `agentlamp revoke --kid <kid> --admin-token "$AGENTLAMP_ADMIN_TOKEN"` (or admin revoke) | no | no |
 | Rejoin a known WiFi | (nothing — auto-joins) | no | no |
 | Join a new WiFi | captive portal, WiFi fields only (relay URL / token stay prefilled) | yes (NVS only) | no |

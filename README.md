@@ -11,10 +11,10 @@
 一眼看清 Claude Code / Codex 在忙什么 —— 不用切窗口、不用盯日志。
 一块放在桌上的小屏，实时、安静、隐私优先。
 
-![platform](https://img.shields.io/badge/platform-ESP32--S3-2b6cb0)
+![readers](https://img.shields.io/badge/readers-ESP32--S3%20·%20iPhone-2b6cb0)
 ![license](https://img.shields.io/badge/license-MIT-3a9d3a)
 ![privacy](https://img.shields.io/badge/privacy-default--deny-d97706)
-![tests](https://img.shields.io/badge/tests-425%20passing-2ea44f)
+![tests](https://img.shields.io/badge/tests-455%20passing-2ea44f)
 ![self-host](https://img.shields.io/badge/self--host-single--owner-6b7280)
 
 </div>
@@ -75,6 +75,17 @@ cd firmware && pio run -e waveshare-s3-lcd-147 -t upload
 - 云端中继部署（Cloudflare）→ [`docs/cloud/deploy.md`](docs/cloud/deploy.md)
 - 多机 / 换电脑 / 换网「一分钟切换」→ [`docs/runbook/switch-fast.md`](docs/runbook/switch-fast.md)
 
+## 📟 支持的硬件（读取端 / readers）
+
+状态屏不止一种 —— 任何能拉同一份 JSON 帧的设备都是合法「读取端」。云端 / 采集器**不感知**用的是哪种硬件，加一种新设备**永不动核心**。完整目录见 [`readers/`](readers/)。
+
+| 读取端 | 硬件 | 渲染 | 状态 | 效果 | 代码 | 部署 |
+|--------|------|------|------|------|------|------|
+| **ESP32 实体灯** | Waveshare ESP32-S3-LCD-1.47B（172×320 + RGB） | C++ / PlatformIO | ✅ 已上线 | 桌面小屏，~4 秒实时 | [`firmware/`](firmware/) | [`docs/BUILD.md`](docs/BUILD.md) |
+| **iPhone 组件** | 任意 iPhone（iOS 16+） | Scriptable JS | 🆕 单文件脚本就绪，待真机部署 | 主屏/锁屏组件，~5–15 分钟刷新 | [`readers/iphone-widget/`](readers/iphone-widget/) | [`readers/iphone-widget/DEPLOY.md`](readers/iphone-widget/DEPLOY.md) |
+
+> 两者渲染**同一组场景**（聚焦 / 舰队 / 额度 / 告警，即本页顶部那一排图），区别只在渲染语言和形态。iPhone 组件**零硬件成本**：装个免费 App、贴一段单文件脚本、填三个常量即可（见 [`readers/iphone-widget/DEPLOY.md`](readers/iphone-widget/DEPLOY.md)）。
+
 ## 🔒 隐私与安全
 
 - **默认拒绝脱敏**：采集器是唯一做「原始 → 安全」转换的地方，只上报*枚举状态 / 用户自定义别名 / 带密钥 HMAC 标签*。
@@ -93,11 +104,12 @@ cd firmware && pio run -e waveshare-s3-lcd-147 -t upload
 ## 🧭 现状
 
 本地模式可用；云端中继已实现并实测上线（Cloudflare Worker + Durable Object + KV，端到端验证通过）。
-**425 个自动化测试通过**（Python 305 + TypeScript 120），跨语言一致性由生成式 parity 语料锁定。
+**455 个自动化测试通过**（Python 315 + TypeScript 125 + iPhone reader 15），跨语言一致性由生成式 parity 语料锁定。
 设计与演进记录见 [`docs/devlog/`](docs/devlog/)。
 
 ## 📚 深入文档
 
+[支持的硬件 / readers](readers/) ·
 [产品规格](docs/product/product_spec.md) ·
 [架构](docs/architecture/architecture.md) ·
 [设备帧 API](docs/api/device_frame_api.md) ·

@@ -97,17 +97,20 @@ HMAC, applies an edge rate-limit, and forwards to the single DO instance.
 Because the device polls **one fixed relay URL**, neither switching computer nor switching
 WiFi touches the relay or the device's backend config:
 
-- **Switch computer** → run the collector on the new machine. This is **not** a single
-  magic command: `agentlamp enroll` installs the whole stack (hooks + keyring pepper /
-  aliases + collector secret + relay push — invariant I5), but it **requires you to pass a
-  `kid` + signing `secret`** (`--kid` / `--secret`) — enroll does **not** generate them.
-  You provision that `kid:secret` pair once when you stand up the relay
-  (`wrangler secret put AGENTLAMP_COLLECTOR_KEYS`, see `../cloud/deploy.md` §3), then paste
-  the pair into enroll on each machine; enroll's step 6 registers it with the DO's live
-  registry (no redeploy). The real bring-up sequence is `enroll` → source the written
-  `relay.env` → start the daemon. Revoke = the `/admin/collectors/{kid}/revoke` route
-  removes the `kid` from the DO registry. An un-enrolled machine shows offline / stale,
-  never "magically follows."
+- **Switch computer** → run the collector on the new machine. `agentlamp enroll` installs the
+  whole stack (hooks + keyring pepper / aliases + collector secret + relay push — invariant I5)
+  and, **omitting `--kid` / `--secret`, MINTS a fresh `kid` + a 256-bit signing secret for you**
+  — that is the headline one-liner: `AGENTLAMP_ADMIN_TOKEN=… agentlamp enroll --relay-host
+  {RELAY_URL} --collector-id <name>`. Enroll's step 6 self-registers the minted pair with the
+  DO's live registry over the authed `/admin` route (**no `wrangler deploy`**). The admin call
+  carries the bearer **plus** the DO's required freshness headers (`X-ACO-Timestamp` +
+  single-use `X-ACO-Nonce`). Passing explicit `--kid` / `--secret` is the **optional**
+  rotation / pinning path; the static `AGENTLAMP_COLLECTOR_KEYS` binding (`../cloud/deploy.md`
+  §3) is the bootstrap/seed alternative, no longer the only way in. Bring-up: `enroll` → start
+  the daemon (config is read from `relay.json` directly — sourcing `relay.env` is optional).
+  Revoke = `agentlamp revoke --kid <kid>` (the `/admin/collectors/{kid}/revoke` route removes
+  the `kid` from the DO registry, effective immediately). An un-enrolled machine shows offline /
+  stale, never "magically follows."
 - **Switch WiFi** → the device auto-joins any stored network, else raises a captive portal
   (AP `AgentLamp-Setup-<suffix>`, password `agentlamp`). The form carries WiFi network /
   password / Server URL / Device token, but a routine switch changes only the two WiFi
@@ -168,11 +171,49 @@ take a feed. Treat the bullets above as the planned shape, not current behavior.
 |-------|------|--------------|
 | Collector | Local reads, sanitization, event signing, aggregation/priority (local mode), offline replay (relay mode) | Provider credentials, provider browser sessions |
 | Cloud relay (relay mode only) | Auth, ingest, dedupe, state machines, priority, frame generation, admin | Provider credentials, raw local content, any unsanitized field |
-| ESP32 | Fetch, parse, render, animation, RGB, offline/stale cache | Sorting sessions, quota risk calculation, provider logic |
+| Display / reader (ESP32 LCD, iPhone widget, … any future hardware) | Fetch, parse, render, animation, offline/stale cache | Sorting sessions, quota risk calculation, provider logic |
 
 > In **local mode** the collector owns aggregation + priority + frame generation
 > directly (no cloud). In **relay mode** those move to the cloud. The display-priority
 > rules are defined once in `cloud_contract.md` and reused by the local frame server.
+
+### Heterogeneous readers (hardware extensibility)
+
+Readers are **interchangeable consumers of the `GET /api/v1/device/:id/frame` contract**, not a
+code module. The ESP32 LCD (C++) and the iPhone Scriptable widget (JS) share **zero rendering
+code** — only the versioned schema-v1 frame + Bearer auth + transport. That wire contract *is*
+the hardware-abstraction boundary: a new hardware type (Android widget, e-ink board, desktop
+menubar, …) attaches by implementing "fetch → parse → render" against the same frame, with **no
+collector or cloud change** — exactly as the iPhone did. **Adding a reader is never a core
+refactor**, and there is deliberately no shared "Reader" class to abstract — an LCD renderer and
+an iOS-widget renderer have nothing renderable in common; forcing shared code would be the wrong
+abstraction.
+
+**One known shape limit (reactive, not yet built):** the frame is currently sized for the lamp
+(`FLEET_MAX_ROWS=5`, `FRAME_BYTE_CAP=2048` — a 1.47" LCD). Phone-sized widgets fit it fine. A
+future *larger* display that wants more rows should negotiate via an optional `X-Frame-Profile`
+header (the reader already sends `X-Frame-Schema-Version`); the frame builder shapes the caps per
+profile, absent header → default `lamp`. ~30 additive lines at the existing seam, fully backward-
+compatible. **Build it when a hardware type actually strains the lamp shape — not before** (today
+ESP32 + phone both fit).
+
+> Reader catalog (supported hardware + per-device code/deploy): [`../../readers/`](../../readers/).
+
+### Scaling envelope (single-owner by design)
+
+The relay routes **all** collectors and **all** device reads to one global Durable Object
+(`idFromName("relay")`). That is the right call **at single-owner scale** — it gives strongly
+consistent, zero-config fan-in (one shared frame, see the multi-device plan) — but it is a
+deliberate ceiling, not a free lunch. Per Cloudflare's own guidance a single DO has a soft
+~1,000 req/s limit, and `blockConcurrencyWhile()` held across I/O (fetch/KV/R2) collapses
+throughput further; the documented scaling pattern is to **shard by your unit of coordination**
+and keep the DO doing fan-out with heavy aggregation moved to a separate worker. AgentLamp's
+load (a handful of computers + a phone polling every 5–15 min) is orders of magnitude under that
+ceiling, so the singleton stays. **Escape hatch if this ever grows to a fleet / multi-tenant
+product:** shard the DO by owner — `idFromName(owner_id)` instead of the constant `"relay"` —
+which also restores the per-owner isolation v1 intentionally skipped (see *Tenancy (v1)*). Don't
+build that until real multi-owner load demands it.
+> Source: Cloudflare, *Rules of Durable Objects* (best-practices) + *Limits*.
 
 ## Data Flow
 
