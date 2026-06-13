@@ -21,6 +21,11 @@ export const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 export const TIMESTAMP_WINDOW_S = 300; // ±300 s
 export const NONCE_TTL_S = 720; // > window + buffer
 export const IDEMPOTENCY_TTL_S = 7 * 24 * 3600; // 7 days
+// Hard cap on retained idempotency records. The whole map is serialized into ONE DO storage value
+// (≤2 MiB) by persistIdem; a TTL-only sweep let it grow unbounded under load until SQLITE_TOOBIG
+// 500'd every ingest (and froze persistFrame). Bound by COUNT too — evict oldest first (Map keeps
+// insertion order). 2000 single-event batches ≈ <1 MiB; the retry window only needs in-flight keys.
+export const IDEMPOTENCY_MAX_ENTRIES = 2000;
 export const MAX_EVENTS_PER_REQUEST = 50;
 export const MAX_BODY_BYTES = 100 * 1024; // 100 KB
 export const SUPPORTED_SCHEMA_VERSION = 1;

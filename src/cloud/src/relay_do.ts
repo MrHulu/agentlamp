@@ -19,6 +19,7 @@
  */
 import {
   IDEMPOTENCY_TTL_S,
+  IDEMPOTENCY_MAX_ENTRIES,
   MAX_BODY_BYTES,
   MAX_EVENTS_PER_REQUEST,
   NONCE_RE,
@@ -61,6 +62,9 @@ interface Env {
   // are internal (reached only after the Worker's constant-time bearer gate passes). Declared
   // here so the Env shape is complete and accurate across both modules.
   AGENTLAMP_ADMIN_TOKEN?: string;
+  // Optional owner brand shown as the panel title (project-agnostic). Configurable, never
+  // hardcoded (I3): set via `wrangler secret put BRAND_NAME` or a deploy `--var`. Absent → readers fall back.
+  BRAND_NAME?: string;
 }
 
 const RETENTION_DEFAULT_DAYS = 30;
@@ -293,10 +297,23 @@ export class RelayDO {
   }
 
   private idemPut(key: string, value: unknown, now: number): void {
-    if (this.idem.size > 8192) {
-      for (const [k, rec] of this.idem) if (rec.exp <= now) this.idem.delete(k);
-    }
     this.idem.set(key, { exp: now + IDEMPOTENCY_TTL_S, value });
+    this.trimIdem(now);
+  }
+
+  // Drop expired records, then enforce the hard COUNT cap (oldest first — a Map iterates in
+  // insertion order). Shared by idemPut + the alarm sweep so NEITHER persist path can write an
+  // oversized "idem" value (the SQLITE_TOOBIG → 500-every-ingest outage, 2026-06-09). Self-heals
+  // an already-bloated on-disk map: the first call after a cold load trims before persistIdem runs.
+  private trimIdem(now: number): void {
+    for (const [k, rec] of this.idem) if (rec.exp <= now) this.idem.delete(k);
+    if (this.idem.size > IDEMPOTENCY_MAX_ENTRIES) {
+      let excess = this.idem.size - IDEMPOTENCY_MAX_ENTRIES;
+      for (const k of this.idem.keys()) {
+        if (excess-- <= 0) break;
+        this.idem.delete(k);
+      }
+    }
   }
 
   // -- per-event apply (validate-only gate, I1) --------------------------------------------
@@ -531,7 +548,7 @@ export class RelayDO {
     const requested = Number.parseInt(url.searchParams.get("schema_version") ?? "1", 10);
     const now = Date.now() / 1000;
     try {
-      const frame = buildFrame(this.frame, deviceId, now, Number.isFinite(requested) ? requested : 1);
+      const frame = buildFrame(this.frame, deviceId, now, Number.isFinite(requested) ? requested : 1, this.env.BRAND_NAME ?? "");
       return Response.json(frame, { headers: { "X-Frame-Schema-Version": String(frame["v"]) } });
     } catch (err) {
       if (err instanceof SchemaVersionError) {
@@ -679,7 +696,7 @@ export class RelayDO {
     // Sweep expired nonces + idempotency keys, then re-persist the pruned stores so the on-disk
     // copy doesn't grow unbounded across evictions (docs/devlog/16 HIGH: persist + alarm-sweep).
     for (const [k, e] of this.nonces) if (e <= now) this.nonces.delete(k);
-    for (const [k, rec] of this.idem) if (rec.exp <= now) this.idem.delete(k);
+    this.trimIdem(now);
 
     this.recordAudit(now, "retention_purge", `purged=${purged} cutoff=${Math.trunc(cutoff)}`);
     await this.persistFrame();

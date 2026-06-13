@@ -17,6 +17,7 @@
 import { SELF, env, createExecutionContext, waitOnExecutionContext, runInDurableObject } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
+import { IDEMPOTENCY_MAX_ENTRIES } from "../src/sign";
 
 const KID = "k1";
 const SECRET = "test-collector-secret";
@@ -842,6 +843,49 @@ describe("HIGH: persistence survives DO eviction", () => {
       expect(di.frame.sessions["__evicted__"]).toBeUndefined();
       expect(Object.keys(di.frame.sessions).length).toBe(0);
       expect(di.frame.seq).toBe(0);
+    });
+  });
+
+  // OUTAGE 2026-06-09: idemPut only swept EXPIRED records (size>8192), never bounded the COUNT, so
+  // the 7-day window grew until the single serialized "idem" DO value crossed the SQLite per-value
+  // limit → persistIdem threw SQLITE_TOOBIG → opIngest 500'd EVERY event and persistFrame never ran
+  // (frozen widget). The fix bounds idem by count (oldest-first) in a shared trimIdem.
+  it("idempotency map is HARD-CAPPED by count → persistIdem can't overflow (SQLITE_TOOBIG outage)", async () => {
+    await runInDurableObject(relayStubE(), async (instance) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const di = instance as any;
+      const now = Date.now() / 1000;
+      // Simulate a cold-loaded BLOATED map: way over the cap, all unexpired (TTL sweep is a no-op,
+      // exactly the production condition where eviction never fired).
+      di.idem = new Map();
+      const over = IDEMPOTENCY_MAX_ENTRIES + 250;
+      for (let i = 0; i < over; i++) {
+        di.idem.set(`old:${String(i).padStart(7, "0")}`, { exp: now + 99999, value: { ok: true, ingest_id: `ing_${i}` } });
+      }
+      expect(di.idem.size).toBe(over);
+
+      // A single new idemPut must trim the whole thing back to the cap (oldest evicted first).
+      di.idemPut("fresh:newest", { ok: true, ingest_id: "ing_newest" }, now);
+      expect(di.idem.size).toBe(IDEMPOTENCY_MAX_ENTRIES);
+      expect(di.idem.has("fresh:newest")).toBe(true); // newest kept
+      expect(di.idem.has("old:0000000")).toBe(false); // oldest evicted
+
+      // The self-heal contract: persistIdem now writes a bounded value and resolves (no throw).
+      await expect(di.persistIdem()).resolves.toBeUndefined();
+    });
+  });
+
+  it("trimIdem drops EXPIRED records before applying the count cap", async () => {
+    await runInDurableObject(relayStubE(), async (instance) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const di = instance as any;
+      const now = Date.now() / 1000;
+      di.idem = new Map();
+      di.idem.set("expired:a", { exp: now - 1, value: { ok: true } });
+      di.idem.set("live:b", { exp: now + 99999, value: { ok: true } });
+      di.trimIdem(now);
+      expect(di.idem.has("expired:a")).toBe(false);
+      expect(di.idem.has("live:b")).toBe(true);
     });
   });
 });

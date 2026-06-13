@@ -91,6 +91,19 @@ const FORBIDDEN_PATTERNS: Array<{ re: RegExp; name: string }> = FORBIDDEN_PATTER
 const MODEL_ID_RE = new RegExp(POLICY.model_id_regex, MODEL_ID_IGNORECASE ? "i" : "");
 const CODE_DENSITY_RE = /[{};]/g;
 const ALIAS_SHAPE_RE = new RegExp(POLICY.alias_shape_regex);
+// Owner display-label shape (mirrors sanitize.py looks_like_display_label): multi-segment
+// kebab/underscore, length-capped. Owner-labels mode legitimately transits readable labels
+// (folder names / session titles, e.g. ``fix-orphan-chrome-processes``); the shape still bans
+// every path/email/scheme character and the step-2 forbidden scan runs on every leaf.
+const DISPLAY_LABEL_RE = new RegExp(POLICY.display_label_regex);
+
+function looksLikeDisplayLabel(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= POLICY.display_label_max_len &&
+    DISPLAY_LABEL_RE.test(value)
+  );
+}
 
 /** NFKC-fold + drop zero-width / control / format chars (Unicode Cc, Cf). Mirrors
  * sanitize.py._strip_invisibles — used for SCANNING only. */
@@ -243,11 +256,15 @@ export function validateSanitizedEvent(event: unknown): Record<string, unknown> 
     throw new SanitizationError("needs_attention_not_bool", ph);
   }
 
-  // 6. alias-shape fields: positively neutral (relay strict).
+  // 6. alias-shape fields: positively neutral (relay strict) OR the owner display-label
+  //    shape (mirrors validate.py step 6 — alias_shape parity gap fixed 2026-06-11).
   for (const f of ALIAS_FIELDS) {
     const val = p[f];
-    if (val !== undefined && val !== null && !looksLikeNeutralAlias(String(val))) {
-      throw new SanitizationError(`alias_shape:${f}`, ph);
+    if (val !== undefined && val !== null) {
+      const s = String(val);
+      if (!looksLikeNeutralAlias(s) && !looksLikeDisplayLabel(s)) {
+        throw new SanitizationError(`alias_shape:${f}`, ph);
+      }
     }
   }
 
@@ -290,6 +307,8 @@ export interface ValidatedQuota {
   used_ratio: number;
   confidence: string;
   is_estimated: boolean;
+  plan: string;             // subscription tier (validate-if-present; "" when absent/unknown)
+  reset_at: number | null;  // epoch seconds (validate-if-present; null when absent/invalid)
 }
 
 /**
@@ -361,6 +380,25 @@ export function validateQuotaEvent(ev: unknown): ValidatedQuota {
     confidence = "unknown";
   }
 
+  // plan (optional display metadata): keep only a recognized tier, lowercased; drop anything else
+  // (forgiving — an unrecognized plan must never reject the quota). This is the ONE field where a
+  // plan tier is intentionally allowed (it never flows through the alias neutrality check).
+  let plan = "";
+  const planRaw = p["plan"];
+  if (planRaw !== undefined && planRaw !== null) {
+    const pv = String(planRaw).trim().toLowerCase();
+    if (PLAN_TIERS.includes(pv) || pv === "free" || pv === "unknown") plan = pv;
+  }
+
+  // reset_at (optional): a finite epoch-seconds number > 0; otherwise dropped to null (forgiving,
+  // reject bool BEFORE Number() like used_ratio so `true`→1 can't masquerade as a timestamp).
+  let resetAt: number | null = null;
+  const resetRaw = p["reset_at"];
+  if (resetRaw !== undefined && resetRaw !== null && typeof resetRaw !== "boolean") {
+    const n = typeof resetRaw === "number" ? resetRaw : Number(resetRaw);
+    if (Number.isFinite(n) && n > 0) resetAt = Math.trunc(n);
+  }
+
   return {
     provider,
     account_alias: accountAlias,
@@ -368,5 +406,7 @@ export function validateQuotaEvent(ev: unknown): ValidatedQuota {
     used_ratio: usedNum,
     confidence: confidence as string,
     is_estimated: p["is_estimated"] === undefined ? true : Boolean(p["is_estimated"]),
+    plan,
+    reset_at: resetAt,
   };
 }

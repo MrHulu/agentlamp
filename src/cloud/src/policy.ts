@@ -30,6 +30,8 @@ export interface Policy {
   title_max_len: number;
   alias_shape_regex: string;
   display_label_regex: string;
+  /** Owner display-label cap (sanitize.DISPLAY_LABEL_MAX_LEN) — DATA-sourced, not retyped. */
+  display_label_max_len: number;
   model_id_regex: string;
   /** provider_session_id shape gate (2026-06-03 hardening). DATA-sourced (not hand-retyped) so
    * looksLikeSessionId mirrors validate.py step 7 byte-for-byte — same I2 contract as the alias
