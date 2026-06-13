@@ -205,7 +205,13 @@
         "project": "project-a",
         "task": "idle"
       },
-      "fleet": [],
+      "fleet": [
+        {
+          "provider": "project-a",
+          "count": 1,
+          "status": "IDLE"
+        }
+      ],
       "quota": [],
       "accent": "muted",
       "ttl": 5

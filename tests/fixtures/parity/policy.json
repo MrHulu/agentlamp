@@ -104,12 +104,15 @@
     "team",
     "pro",
     "plus",
-    "enterprise"
+    "enterprise",
+    "max_5x",
+    "max_20x"
   ],
   "alias_max_len": 40,
   "title_max_len": 28,
   "alias_shape_regex": "^(?:\u2014|hmac:[a-z0-9]+|[a-z0-9]+(?:-[a-z0-9]+)?)$",
   "display_label_regex": "^[a-z0-9]+(?:[-_][a-z0-9]+)*$",
+  "display_label_max_len": 40,
   "model_id_regex": "(claude-(?:opus|sonnet|haiku|instant)|(?:opus|sonnet|haiku)-\\d|gpt-[0-9o]|\\bft:|gemini-\\d|llama-?\\d|\\bo[134]-(?:mini|preview)\\b)",
   "model_id_ignorecase": true,
   "session_id_max_len": 80,

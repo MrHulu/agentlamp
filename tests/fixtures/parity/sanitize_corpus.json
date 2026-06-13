@@ -439,5 +439,65 @@
     },
     "expect": "rejected",
     "reason": "session_id_shape"
+  },
+  {
+    "name": "accept_owner_multisegment_title",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a",
+        "display_title": "fix-orphan-chrome-processes"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "accept_owner_multisegment_project",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "my-cool-side-project"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "accepted"
+  },
+  {
+    "name": "reject_overlong_display_title",
+    "event": {
+      "schema_version": 1,
+      "provider": "claude",
+      "provider_event_name": "SessionStart",
+      "provider_session_id": "hmac:abc123def456",
+      "event_time": 1780000000,
+      "payload": {
+        "status": "CODING",
+        "task_label": "implementing",
+        "project_alias": "project-a",
+        "display_title": "a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-end"
+      },
+      "sanitization": {
+        "policy_version": 1
+      }
+    },
+    "expect": "rejected",
+    "reason": "alias_shape:display_title"
   }
 ]

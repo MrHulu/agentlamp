@@ -59,6 +59,7 @@ def gen_policy() -> dict:
         "title_max_len": S.TITLE_MAX_LEN,
         "alias_shape_regex": S._ALIAS_SHAPE_RE.pattern,
         "display_label_regex": S._DISPLAY_LABEL_RE.pattern,
+        "display_label_max_len": S.DISPLAY_LABEL_MAX_LEN,
         "model_id_regex": S._MODEL_ID_RE.pattern,
         "model_id_ignorecase": bool(S._MODEL_ID_RE.flags & re.IGNORECASE),
         # provider_session_id shape gate (2026-06-03 hardening). validate.py step 7 requires the
@@ -166,6 +167,20 @@ def gen_sanitize_corpus() -> list:
         ("reject_freetext_session_id",
          _env({"status": "CODING", "task_label": "implementing", "project_alias": "project-a"},
               psid="please fix auth now")),
+        # Owner display labels (multi-segment kebab) transit the relay verbatim in owner-labels
+        # mode — e.g. an auto session title derived from Claude's own transcript ai-title
+        # ("fix-orphan-chrome-processes") or a multi-word folder name. The strict 2-segment
+        # neutral shape alone used to reject these (alias_shape parity gap, fixed 2026-06-11);
+        # the display shape still bans / \ @ . : and uppercase, and is length-capped.
+        ("accept_owner_multisegment_title",
+         _env({"status": "CODING", "task_label": "implementing", "project_alias": "project-a",
+               "display_title": "fix-orphan-chrome-processes"})),
+        ("accept_owner_multisegment_project",
+         _env({"status": "CODING", "task_label": "implementing",
+               "project_alias": "my-cool-side-project"})),
+        ("reject_overlong_display_title",
+         _env({"status": "CODING", "task_label": "implementing", "project_alias": "project-a",
+               "display_title": "a-" * 21 + "end"})),
     ]
     out = []
     for name, event in raw_cases:
