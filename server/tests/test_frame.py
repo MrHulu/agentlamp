@@ -585,9 +585,11 @@ def test_fleet_groups_by_project_with_count():
     assert "agentlamp" in rows and rows["agentlamp"]["count"] == 1
 
 
-def test_fleet_count_is_active_only_not_total():
-    """R2/TASK-010: the row count = ACTIVE agents in the project, not total-present.
-    5 ai-center sessions where 3 are CODING and 2 are DONE → count 3, not 5."""
+def test_fleet_count_includes_recent_done_on_roster():
+    """Roster semantics (Boss 2026-06-09): the row count = sessions on the ROSTER —
+    working now OR finished/idle within ROSTER_TTL_S — so a just-completed session does
+    not vanish. 5 fresh ai-center sessions (3 CODING + 2 DONE) → count 5, and the row
+    status is the highest-priority one (CODING)."""
     st = _state()
     for i in range(3):
         _inject_sid(st, f"hmac:a{i}", project="ai-center", status="CODING")
@@ -596,21 +598,43 @@ def test_fleet_count_is_active_only_not_total():
     # A second active project so the scene is the fleet overview (≥2 active).
     _inject_sid(st, "hmac:b", project="other", status="CODING")
     rows = {r["provider"]: r for r in st.build_frame("orb-01")["fleet"]}
-    assert rows["ai-center"]["count"] == 3   # 2 DONE excluded
-    assert rows["ai-center"]["status"] == "CODING"
+    assert rows["ai-center"]["count"] == 5   # 2 recent DONE now kept on the roster
+    assert rows["ai-center"]["status"] == "CODING"  # top-priority status wins the row
 
 
-def test_fleet_drops_all_idle_or_done_project():
-    """R2/TASK-010: a project where every session is idle/done has zero active agents
-    and drops off the fleet entirely (the fleet answers 'who is busy')."""
+def test_fleet_keeps_recent_idle_or_done_project():
+    """Roster semantics: a project where every session just finished/idled stays on the
+    fleet briefly (within ROSTER_TTL_S) instead of disappearing the instant it stops —
+    the whole point of the roster (Boss: 'session 完成后你就不显示了')."""
     st = _state()
     _inject_sid(st, "hmac:c1", project="active-proj", status="CODING")
     _inject_sid(st, "hmac:c2", project="active-proj", status="TESTING")
     _inject_sid(st, "hmac:d1", project="finished-proj", status="DONE")
     _inject_sid(st, "hmac:d2", project="finished-proj", status="IDLE")
+    rows = {r["provider"]: r for r in st.build_frame("orb-01")["fleet"]}
+    assert "active-proj" in rows
+    assert "finished-proj" in rows          # recently finished/idle → still on the roster
+    assert rows["finished-proj"]["count"] == 2
+    assert rows["finished-proj"]["status"] in ("DONE", "IDLE")
+
+
+def test_fleet_drops_session_past_roster_ttl(monkeypatch):
+    """The roster is time-bounded: a session whose last event is older than ROSTER_TTL_S
+    ages off the fleet (so the list shows *recent* sessions, not an ever-growing history)."""
+    import agentlamp_server.state as state_mod
+
+    st = _state()
+    base = state_mod._now()
+    # A session that finished long ago (its updated_at stays at `base`).
+    _inject_sid(st, "hmac:old", project="finished-proj", status="DONE")
+    # Jump now past the roster window; re-touch the collector heartbeat so the scene
+    # isn't forced offline, then add a session that is working *now* (fresh).
+    monkeypatch.setattr(state_mod, "_now", lambda: base + state_mod.ROSTER_TTL_S + 200)
+    st.last_collector_heartbeat = base + state_mod.ROSTER_TTL_S + 200
+    _inject_sid(st, "hmac:fresh", project="active-proj", status="CODING")
     labels = [r["provider"] for r in st.build_frame("orb-01")["fleet"]]
-    assert "active-proj" in labels
-    assert "finished-proj" not in labels  # all-idle/done project drops off
+    assert "active-proj" in labels          # fresh worker on the roster
+    assert "finished-proj" not in labels    # finished > ROSTER_TTL_S ago → dropped
 
 
 def test_waiting_still_interrupts_busy_fleet():

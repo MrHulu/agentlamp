@@ -120,9 +120,16 @@ def validate_sanitized_event(event: dict) -> dict:
     if "needs_attention" in payload and not isinstance(payload["needs_attention"], bool):
         raise S.SanitizationError("needs_attention_not_bool", ph)
 
-    # 6. alias-shape fields: positively neutral (relay strict).
+    # 6. alias-shape fields: positively neutral (relay strict) OR the owner display-label
+    #    shape (multi-segment kebab/underscore, bounded — sanitize.looks_like_display_label).
+    #    Owner-labels mode legitimately transits readable labels (folder names / session
+    #    titles, e.g. ``fix-orphan-chrome-processes``); the display shape still bans every
+    #    path/email/scheme character and step 2's forbidden scan already ran on every leaf.
     for f in _ALIAS_FIELDS:
-        if payload.get(f) is not None and not S.looks_like_neutral_alias(str(payload[f])):
+        v = payload.get(f)
+        if v is not None and not (
+            S.looks_like_neutral_alias(str(v)) or S.looks_like_display_label(str(v))
+        ):
             raise S.SanitizationError(f"alias_shape:{f}", ph)
 
     # 7. provider_session_id shape gate (2026-06-03 hardening): it is leaf-scanned (step 2) but
@@ -208,6 +215,28 @@ def validate_quota_event(ev: dict) -> dict:
     else:
         confidence = "unknown"
 
+    # plan (optional display metadata): keep a recognized tier lowercased; drop anything else
+    # (forgiving — an unrecognized plan must never reject the quota). This is the ONE field where a
+    # plan tier is intentionally allowed (it never flows through the alias neutrality check).
+    plan = ""
+    plan_raw = p.get("plan")
+    if plan_raw is not None:
+        pv = str(plan_raw).strip().lower()
+        if pv in S._PLAN_TIERS or pv in ("free", "unknown"):
+            plan = pv
+
+    # reset_at (optional): finite epoch seconds > 0; otherwise dropped to None (forgiving; reject
+    # bool BEFORE float() like used_ratio so True→1.0 can't masquerade as a timestamp).
+    reset_at = None
+    reset_raw = p.get("reset_at")
+    if reset_raw is not None and not isinstance(reset_raw, bool):
+        try:
+            rn = float(reset_raw)
+        except (TypeError, ValueError):
+            rn = None
+        if rn is not None and math.isfinite(rn) and rn > 0:
+            reset_at = int(rn)
+
     return {
         "provider": provider,
         "account_alias": account_alias,
@@ -215,4 +244,6 @@ def validate_quota_event(ev: dict) -> dict:
         "used_ratio": used_ratio,
         "confidence": confidence,
         "is_estimated": bool(p.get("is_estimated", True)),
+        "plan": plan,
+        "reset_at": reset_at,
     }

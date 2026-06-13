@@ -39,6 +39,12 @@ from . import sanitize as S
 STALE_AFTER_S = float(os.environ.get("AGENTLAMP_STALE_AFTER_S", "120"))
 OFFLINE_AFTER_S = float(os.environ.get("AGENTLAMP_OFFLINE_AFTER_S", "600"))
 COLLECTOR_HEARTBEAT_STALE_S = float(os.environ.get("AGENTLAMP_HEARTBEAT_STALE_S", "90"))
+# A finished/idle session stays on the fleet ROSTER for this long after its last event, so a
+# session COMPLETING does not instantly vanish from the device list (Boss 2026-06-09: "session
+# 完成后你就不显示了"). Active sessions still appear regardless; this only governs how long the
+# calm DONE/IDLE states linger as roster rows before they age off (active sessions age to
+# STALE/OFFLINE via _effective_status independently).
+ROSTER_TTL_S = float(os.environ.get("AGENTLAMP_ROSTER_TTL_S", "1800"))
 
 # Frame TTL (poll interval is 3-5 s; ttl is the firmware's grace window).
 FRAME_TTL = 5
@@ -165,6 +171,8 @@ class QuotaWindow:
     used_ratio: float
     confidence: str = "unknown"
     is_estimated: bool = True
+    plan: str = ""              # subscription tier (e.g. "max"/"pro"); "" when unknown
+    reset_at: int | None = None  # epoch seconds this window resets; None when unknown
     updated_at: float = 0.0
 
     def key(self) -> tuple[str, str, str]:
@@ -186,6 +194,9 @@ class AccountQuota:
     week: float | None = None
     confidence: str = "unknown"
     is_estimated: bool = True
+    plan: str = ""
+    w5_reset: int | None = None
+    week_reset: int | None = None
 
     @property
     def risk(self) -> float:
@@ -385,6 +396,8 @@ class FrameState:
         used_ratio: float,
         confidence: str = "unknown",
         is_estimated: bool = True,
+        plan: str = "",
+        reset_at: int | None = None,
     ) -> None:
         """The SINGLE quota sink (DRY/SOLID chokepoint, 2026-06-03 hardening).
 
@@ -439,6 +452,24 @@ class FrameState:
         if conf not in S.CONFIDENCE_ENUM:
             raise S.SanitizationError("enum:confidence")
 
+        # plan (optional display metadata): keep a recognized tier lowercased; drop anything else
+        # (forgiving — never reject the quota over a plan string; this is the one field a plan tier
+        # is intentionally allowed, separate from the alias neutrality gate above).
+        plan_clean = ""
+        if plan:
+            pv = str(plan).strip().lower()
+            if pv in S._PLAN_TIERS or pv in ("free", "unknown"):
+                plan_clean = pv
+        # reset_at (optional): finite epoch seconds > 0; else None (reject bool BEFORE float()).
+        reset_clean = None
+        if reset_at is not None and not isinstance(reset_at, bool):
+            try:
+                rn = float(reset_at)
+            except (TypeError, ValueError):
+                rn = None
+            if rn is not None and math.isfinite(rn) and rn > 0:
+                reset_clean = int(rn)
+
         with self._lock:
             q = QuotaWindow(
                 provider=provider,
@@ -447,6 +478,8 @@ class FrameState:
                 used_ratio=ratio,
                 confidence=conf,
                 is_estimated=bool(is_estimated),
+                plan=plan_clean,
+                reset_at=reset_clean,
                 updated_at=_now(),
             )
             self.quota[q.key()] = q
@@ -513,9 +546,12 @@ class FrameState:
         return rows
 
     # -- frame generation ----------------------------------------------- #
-    def build_frame(self, device_id: str, schema_version: int = FRAME_SCHEMA_VERSION) -> dict:
+    def build_frame(self, device_id: str, schema_version: int = FRAME_SCHEMA_VERSION, brand: str = "") -> dict:
         """Build the compact device frame for ``device_id`` (scene selection +
-        priority + caps + 2 KB trim). Caller must have already authed the device."""
+        priority + caps + 2 KB trim). Caller must have already authed the device.
+
+        ``brand`` (optional, configurable via env BRAND_NAME — never hardcoded, I3) is shown by
+        readers as the project-agnostic title; absent when unset so readers fall back."""
         with self._lock:
             now = _now()
             # Defensive: a non-int schema_version must surface as a SanitizationError
@@ -533,7 +569,7 @@ class FrameState:
             scene, top, accent, headline = self._select_scene(ordered, quotas, now)
 
             primary = self._primary_block(top, now) if top is not None else _empty_primary()
-            fleet = self._fleet_block(ordered)
+            fleet = self._fleet_block(ordered, now)
             quota_block = self._quota_block(quotas)
 
             frame = {
@@ -549,6 +585,8 @@ class FrameState:
                 "seq": 0,            # filled after signature compare
                 "server_time": int(now),
             }
+            if brand:
+                frame["brand"] = brand
 
             # Sequence increases only when rendered content/scene changes.
             signature = _frame_signature(frame)
@@ -647,19 +685,32 @@ class FrameState:
             "task": s.task_label,
         }
 
-    def _fleet_block(self, ordered: list[tuple[Session, str, int]]) -> list[dict]:
-        """Aggregate **active** sessions per project into fleet rows; ≤ 6,
+    def _on_roster(self, s: "Session", eff: str, now: float) -> bool:
+        """A session is on the fleet ROSTER if it is working now (active) OR it finished /
+        went idle *recently* (DONE/IDLE within ``ROSTER_TTL_S``). This is what keeps a
+        just-completed session visible for a while instead of vanishing the instant it
+        stops (Boss 2026-06-09). Truly-gone sessions (OFFLINE/STALE, or DONE/IDLE older
+        than the roster window) drop off."""
+        if _is_active(eff):
+            return True
+        if eff in ("DONE", "IDLE"):
+            return (now - s.updated_at) <= ROSTER_TTL_S
+        return False
+
+    def _fleet_block(self, ordered: list[tuple[Session, str, int]], now: float) -> list[dict]:
+        """Aggregate **roster** sessions per project into fleet rows; ≤ 5,
         truncate lowest priority, overflow implied by ``fleet_more`` if present.
 
         The frame's ``fleet`` is a list of ``{provider, count, status}`` rows
         (device_frame_api.md schema example).
 
-        Count semantics (R2/TASK-010): ``count`` is the number of **active** agents
-        in the project (``_is_active`` — not idle/done/unknown/stale/offline), so the
-        number matches "how many are busy", never total-present. A project with zero
-        active agents drops off the fleet entirely (the fleet answers "who is busy",
-        and the all-idle case is handled by the calm sleep scene). The row's status
-        is the highest-priority status **among the project's active sessions**.
+        Roster semantics (Boss 2026-06-09 "show all currently-running session names"):
+        a row is kept when the session is on the roster (``_on_roster`` — working now,
+        or finished/idle within ``ROSTER_TTL_S``), so a session COMPLETING lingers on
+        the list briefly instead of disappearing the instant it stops. ``count`` is the
+        number of roster sessions in the group; the row status is the highest-priority
+        status among them (so a group with one CODING + two DONE shows CODING). A group
+        with no roster sessions drops off entirely.
 
         Label (R3/TASK-011): ``provider`` is the CLEAN project label with NO baked
         ``xN`` suffix — the count rides in the structured ``count`` field and the
@@ -668,10 +719,10 @@ class FrameState:
         count in the simulator.)"""
         # Group by display label = session title when named, else project (R4/TASK-012):
         # named sessions surface as their own row, unnamed ones aggregate by project. For an
-        # owner running many agents the useful axis is "which work, how many busy, doing what".
+        # owner running many agents the useful axis is "which sessions, how many, doing what".
         groups: dict[str, dict] = {}
         for s, eff, score in ordered:
-            if not _is_active(eff):
+            if not self._on_roster(s, eff, now):
                 continue
             key = _display_label(s)
             g = groups.get(key)
@@ -717,8 +768,12 @@ class FrameState:
                 merged[k] = aq
             if q.window_type == "5h":
                 aq.w5 = q.used_ratio
+                aq.w5_reset = q.reset_at
             elif q.window_type == "week":
                 aq.week = q.used_ratio
+                aq.week_reset = q.reset_at
+            if not aq.plan and q.plan:
+                aq.plan = q.plan
             # Worst-case across the account's windows: lowest confidence; estimated
             # if ANY window is estimated.
             if S.CONFIDENCE_INT.get(q.confidence, 0) < S.CONFIDENCE_INT.get(aq.confidence, 0):
@@ -744,6 +799,12 @@ class FrameState:
                 entry["w5"] = round(q.w5, 2)
             if q.week is not None:
                 entry["week"] = round(q.week, 2)
+            if q.plan:
+                entry["plan"] = q.plan
+            if q.w5_reset is not None:
+                entry["w5_reset"] = q.w5_reset
+            if q.week_reset is not None:
+                entry["week_reset"] = q.week_reset
             out.append(entry)
         return out
 

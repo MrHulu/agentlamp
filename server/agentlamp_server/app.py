@@ -157,7 +157,7 @@ def get_frame(
     requested = _coerce_schema_version(x_frame_schema_version, FRAME_SCHEMA_VERSION)
     negotiated = min(FRAME_SCHEMA_VERSION, max(1, requested))
     try:
-        frame = st.build_frame(device_id, schema_version=negotiated)
+        frame = st.build_frame(device_id, schema_version=negotiated, brand=os.environ.get("BRAND_NAME", ""))
     except Exception:
         return JSONResponse(
             status_code=503, content={"error": "frame_unavailable", "retry": True}
@@ -274,6 +274,8 @@ def _apply_ingest_event(st: FrameState, ev: dict) -> dict:
                 used_ratio=q["used_ratio"],
                 confidence=q["confidence"],
                 is_estimated=q["is_estimated"],
+                plan=q.get("plan", ""),
+                reset_at=q.get("reset_at"),
             )
             return {"event_id": eid, "status": "accepted"}
         # session.* / alert.* / unknown → through the independent VALIDATE-only gate (I1,

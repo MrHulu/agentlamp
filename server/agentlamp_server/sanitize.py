@@ -116,7 +116,7 @@ DEFAULT_TEST_KEYWORDS = (
 # Forbidden patterns (sanitization_policy.md → Forbidden Patterns + fixtures).
 # A value matching any of these rejects the WHOLE event (default-deny).
 # --------------------------------------------------------------------------- #
-_PLAN_TIERS = ("max", "team", "pro", "plus", "enterprise")
+_PLAN_TIERS = ("max", "team", "pro", "plus", "enterprise", "max_5x", "max_20x")
 
 # Real model id shapes that must never escape the `model` enum. Anchored on
 # actual model-family tokens (opus/sonnet/haiku/gpt/gemini/llama/ft:) so generic
@@ -262,10 +262,12 @@ def looks_like_session_id(value: str) -> bool:
 # their own desk. Relay mode keeps the strict 2-segment neutral shape so a real cwd
 # basename can never reach a cloud relay operator verbatim.
 _DISPLAY_LABEL_RE = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+DISPLAY_LABEL_MAX_LEN = 40
 
 
 def looks_like_display_label(value: str) -> bool:
-    return bool(value) and len(value) <= 40 and _DISPLAY_LABEL_RE.match(value) is not None
+    return (bool(value) and len(value) <= DISPLAY_LABEL_MAX_LEN
+            and _DISPLAY_LABEL_RE.match(value) is not None)
 
 
 def coerce_alias(value: str, pepper: bytes, *, prefix: str, n: int = 6, display: bool = False) -> str:
