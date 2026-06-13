@@ -17,8 +17,10 @@ for diagnostics — never a hard-fail (``docs/providers/*_adapter.md``).
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import time
 from dataclasses import dataclass
 
 from . import config
@@ -42,6 +44,78 @@ def _readable_label(cwd: str) -> str | None:
     if not lab or S.contains_forbidden(lab) is not None:
         return None
     return lab
+
+# --------------------------------------------------------------------------- #
+# Auto session title (readable-label modes only). Claude Code writes its own
+# AI-generated summary ("ai-title") and the user's /rename ("custom-title") into
+# the session transcript JSONL. When a hook carries no explicit session_title,
+# read the transcript TAIL and reuse those records, so unnamed sessions show a
+# meaningful name instead of collapsing into the shared folder-name row.
+# The value stays RAW here — safe_title in the sanitizer remains the only
+# emission gate (forbidden-pattern scan + kebab + HMAC in relay mode).
+# --------------------------------------------------------------------------- #
+_TRANSCRIPT_ROOTS = (os.path.expanduser("~/.claude/projects"),)
+_TRANSCRIPT_TAIL_BYTES = 256 * 1024
+_TITLE_CACHE_TTL_S = 60.0
+_TITLE_CACHE_MAX = 512
+_title_cache: dict[str, tuple[float, str | None]] = {}  # path -> (read_at, title)
+
+
+def _read_transcript_title(path: str) -> str | None:
+    """Newest custom-title (user /rename always wins) else newest ai-title, from
+    the transcript tail. Only files under ~/.claude/projects are eligible — a
+    hostile queue record must not turn the daemon into an arbitrary-file reader."""
+    try:
+        real = os.path.realpath(path)
+        if not real.endswith(".jsonl") or not any(
+            real.startswith(root + os.sep) for root in _TRANSCRIPT_ROOTS
+        ):
+            return None
+        with open(real, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
+            tail = f.read(_TRANSCRIPT_TAIL_BYTES + 4096).decode("utf-8", "replace")
+    except OSError:
+        return None
+    ai_title = None
+    for line in reversed(tail.splitlines()):
+        if '"custom-title"' not in line and '"ai-title"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("type") == "custom-title":
+            t = rec.get("customTitle")
+            if isinstance(t, str) and t.strip():
+                return t.strip()
+        elif ai_title is None and rec.get("type") == "ai-title":
+            t = rec.get("aiTitle")
+            if isinstance(t, str) and t.strip():
+                ai_title = t.strip()
+    return ai_title
+
+
+def _auto_session_title(hook: dict) -> str | None:
+    """Cached transcript-title lookup — at most one tail read per transcript per
+    ``_TITLE_CACHE_TTL_S``, so a chatty session never turns into an IO loop."""
+    tp = hook.get("transcript_path") or hook.get("transcriptPath")
+    if not isinstance(tp, str) or not tp:
+        return None
+    now = time.time()
+    hit = _title_cache.get(tp)
+    if hit is not None and now - hit[0] < _TITLE_CACHE_TTL_S:
+        return hit[1]
+    title = _read_transcript_title(tp)
+    if len(_title_cache) >= _TITLE_CACHE_MAX:
+        # Long-running daemon stays bounded: drop the stalest half.
+        for k, _ in sorted(_title_cache.items(), key=lambda kv: kv[1][0])[: _TITLE_CACHE_MAX // 2]:
+            _title_cache.pop(k, None)
+    _title_cache[tp] = (now, title)
+    return title
 
 # --------------------------------------------------------------------------- #
 # Tool name -> category. Covers Claude + Codex tool surfaces.
@@ -265,12 +339,22 @@ def normalize_record(record: dict, *, pepper: bytes, aliases) -> NormalizeResult
     }
 
     # Optional per-session title (Claude `--name` / `/rename` → `session_title`; Codex has
-    # none, so this is absent there). Read ONLY this field — NOT the `prompt` field that
-    # rides on UserPromptSubmit. The server's sanitizer (safe_title) is the authoritative
-    # gate that drops anything path/secret-bearing and HMAC-collapses it in relay mode.
+    # none, so this is absent there). Read ONLY title fields — NOT the `prompt` field that
+    # rides on UserPromptSubmit. Unnamed Claude sessions fall back to the transcript's own
+    # title records (see _auto_session_title). The server's sanitizer (safe_title) is the
+    # authoritative gate that drops anything path/secret-bearing and HMAC-collapses it in
+    # relay mode.
     raw_title = hook.get("session_title") or hook.get("sessionTitle")
     if isinstance(raw_title, str) and raw_title.strip():
         base["session_title"] = raw_title.strip()
+    elif config.LOCAL_LABELS:
+        # No explicit name -> fall back to Claude Code's own transcript titles
+        # (newest /rename, else newest AI summary). Readable-label modes only:
+        # relay-HMAC mode would render these as opaque ``title-<hmac>`` noise,
+        # so we skip the transcript IO entirely there.
+        auto_title = _auto_session_title(hook)
+        if auto_title:
+            base["session_title"] = auto_title
 
     # --- map event -> status ----------------------------------------------- #
     if ekey in _FAIL_EVENTS:

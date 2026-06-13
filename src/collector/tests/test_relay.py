@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import os
 import pathlib
 import threading
@@ -167,6 +168,7 @@ def _make_admin_stub(admin_token: str, *, captured=None, enrolled=None):
     (so a test can prove the kid+secret actually landed server-side, then got revoked).
     """
     reg = enrolled if enrolled is not None else {}
+    seen_nonces: set = set()   # single-use nonce store, mirroring the DO's persisted set
 
     class _AdminStub(BaseHTTPRequestHandler):
         def log_message(self, *a):  # silence
@@ -198,6 +200,25 @@ def _make_admin_stub(admin_token: str, *, captured=None, enrolled=None):
             if presented != admin_token:
                 self._json(401, {"error": "admin_unauthorized", "retry": False})
                 return
+            # 2.5 admin FRESHNESS — mirror the DO's checkAdminReplay (the Worker forwards these to
+            #     the DO). A bearer alone is NOT enough: every admin op needs a fresh
+            #     X-ACO-Timestamp (±300s) + a single-use lowercase-hex X-ACO-Nonce, or the real relay
+            #     401s `admin_stale`. Without this the stub would silently hide a client that forgets
+            #     the headers (the devlog/16 admin-replay gap).
+            import time as _t
+            import re as _re
+            ts = self.headers.get("X-ACO-Timestamp", "")
+            nonce = (self.headers.get("X-ACO-Nonce", "") or "").lower()
+            if not ts.isdigit() or abs(int(_t.time()) - int(ts)) > 300:
+                self._json(401, {"error": "admin_stale", "retry": False})
+                return
+            if not _re.fullmatch(r"[0-9a-f]{16,128}", nonce):
+                self._json(401, {"error": "admin_bad_nonce", "retry": False})
+                return
+            if nonce in seen_nonces:
+                self._json(409, {"error": "admin_replay", "retry": False})
+                return
+            seen_nonces.add(nonce)
             # 3. dispatch.
             if action == "enroll":
                 secret = str(body.get("secret", "")).strip()
@@ -700,6 +721,12 @@ def test_enroll_installs_whole_stack_idempotent(_isolated_state, monkeypatch, tm
         assert captured[0]["action"] == "enroll" and captured[0]["kid"] == "k7"
         assert captured[0]["body"] == {"secret": "enroll-secret"}
         assert captured[0]["headers"].get("Authorization") == "Bearer admin-tok-xyz"
+        # The admin op must carry the DO's required FRESHNESS headers (devlog/16): without these the
+        # stub (now mirroring checkAdminReplay) would 401 `admin_stale` and enroll would fail.
+        # (urllib title-cases header names on the wire, so compare case-insensitively.)
+        h0 = {k.lower(): v for k, v in captured[0]["headers"].items()}
+        assert h0.get("x-aco-timestamp", "").isdigit()
+        assert re.fullmatch(r"[0-9a-f]{16,128}", h0.get("x-aco-nonce", "").lower())
 
         # Idempotent: re-running adds NO duplicate hook entry, keeps the secret, and
         # the server-side enroll is a safe re-put (same kid+secret again).
@@ -711,6 +738,10 @@ def test_enroll_installs_whole_stack_idempotent(_isolated_state, monkeypatch, tm
         assert secretstore.get_secret("k7") == "enroll-secret"
         assert registry.get("k7") == "enroll-secret"        # still registered (idempotent)
         assert len(captured) == 2 and captured[1]["action"] == "enroll"
+        # Each admin call mints a FRESH single-use nonce (no replay) — proves the client isn't
+        # reusing a constant nonce that the DO would reject on the 2nd call.
+        h1 = {k.lower(): v for k, v in captured[1]["headers"].items()}
+        assert h0["x-aco-nonce"] != h1["x-aco-nonce"]
     finally:
         srv.shutdown()
 

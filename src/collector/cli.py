@@ -253,11 +253,26 @@ def _admin_token(args: argparse.Namespace) -> str:
     return (getattr(args, "admin_token", "") or "").strip()
 
 
+def _admin_freshness_headers() -> dict:
+    """The relay's /admin surface requires per-request FRESHNESS, not just a bearer (the DO's
+    checkAdminReplay — docs/devlog/16 MED): a fresh ``X-ACO-Timestamp`` (±300s of server time) +
+    a single-use ``X-ACO-Nonce`` (lowercase hex). A bearer alone proves authorization, NOT recency,
+    so WITHOUT these the relay rejects with 401 ``admin_stale`` — and a replayed OLD enroll could
+    otherwise undo a LATER revoke. Minted fresh per call (the Worker forwards them to the DO)."""
+    import time as _time
+    import secrets as _secrets
+    return {
+        "X-ACO-Timestamp": str(int(_time.time())),
+        "X-ACO-Nonce": _secrets.token_hex(16),   # 32 lowercase-hex chars (within the [16,128] range)
+    }
+
+
 def _admin_post(host: str, path: str, body: dict, token: str) -> tuple[int, dict]:
-    """POST to a relay /admin route with the bearer, bypassing any env proxy
-    (reuses netpost's empty-ProxyHandler opener — never touches the system proxy)."""
+    """POST to a relay /admin route with the bearer + admin freshness headers, bypassing any env
+    proxy (reuses netpost's empty-ProxyHandler opener — never touches the system proxy)."""
     url = f"{host.rstrip('/')}{path}"
-    return netpost.post_json(url, body, headers={"Authorization": f"Bearer {token}"})
+    headers = {"Authorization": f"Bearer {token}", **_admin_freshness_headers()}
+    return netpost.post_json(url, body, headers=headers)
 
 
 class CloudRegisterError(Exception):

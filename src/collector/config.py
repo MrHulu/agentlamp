@@ -145,6 +145,25 @@ if "AGENTLAMP_LOCAL_LABELS" in os.environ:
 else:
     LOCAL_LABELS = not RELAY_MODE
 
+# Owner-private readable labels (opt-in; default OFF = repo-safe). When ON, the relay push emits
+# READABLE project + session-title labels (e.g. ``ai-center`` / ``fix-the-widget``) instead of
+# HMAC hashes (``project-9e6aab`` / ``title-9e6aab``). This is for an OWNER mirroring to their OWN
+# private relay (their Cloudflare, their device token): readable names then transit that relay, so
+# it is a deliberate privacy trade the owner opts into — the public-repo default stays HMAC-safe.
+# Turning it on also forces LOCAL_LABELS so normalize emits the readable folder name (which the
+# relay sanitizer then keeps verbatim via its single-owner ``display`` path).
+OWNER_LABELS = os.environ.get("AGENTLAMP_OWNER_LABELS", "0") == "1"
+if OWNER_LABELS:
+    LOCAL_LABELS = True
+
+# --------------------------------------------------------------------------- #
+# Real Claude usage (5h + weekly). Fetched from Anthropic's OAuth usage endpoint
+# — the same authoritative source Claude Code's /usage command shows — via a
+# read-only local OAuth token (never refreshed). See collector/quota.py.
+# --------------------------------------------------------------------------- #
+QUOTA_ENABLED = os.environ.get("AGENTLAMP_QUOTA_ENABLED", "1") == "1"
+QUOTA_INTERVAL_S = float(os.environ.get("AGENTLAMP_QUOTA_INTERVAL_S", "120"))
+
 # Daemon timing.
 DRAIN_INTERVAL_S = float(os.environ.get("AGENTLAMP_DRAIN_INTERVAL_S", "0.5"))
 HEARTBEAT_INTERVAL_S = float(os.environ.get("AGENTLAMP_HEARTBEAT_INTERVAL_S", "30"))

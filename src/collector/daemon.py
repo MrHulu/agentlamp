@@ -36,7 +36,7 @@ _SRC = pathlib.Path(__file__).resolve().parents[1]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from collector import config, netpost, relaypost  # noqa: E402
+from collector import config, netpost, quota, relaypost  # noqa: E402
 from collector.config import S  # noqa: E402
 from collector.normalize import normalize_record  # noqa: E402
 
@@ -185,6 +185,7 @@ def _post_relay(path: pathlib.Path, result, counts: dict, *, pepper: bytes, alia
             kid=config.RELAY_KID, secret=secret, shorthands=[result.event],
             pepper=pepper, aliases=aliases,
             clock_offset=_RELAY_CLOCK_OFFSET, idempotency_key=idem,
+            local_display=config.OWNER_LABELS,
         )
     except netpost.PostError:
         counts["requeued"] += 1   # transport failure → leave + retry
@@ -329,6 +330,43 @@ def _relay_heartbeat() -> bool:
     return False
 
 
+def _push_quota() -> bool:
+    """Fetch real Claude 5h + weekly usage and push it as ``quota.window`` events (relay mode only).
+
+    Reads the live utilization from Anthropic's OAuth usage endpoint (``collector.quota`` — the same
+    source Claude Code's ``/usage`` shows), never transcript content. No token / expiry / network →
+    ``compute_quota`` returns ``[]`` and we skip (last value persists). A transport failure / misconfig
+    returns False (next cycle retries); a stale_timestamp resyncs the shared offset once. Returns True
+    iff the quota batch landed."""
+    global _RELAY_CLOCK_OFFSET
+    if not (config.QUOTA_ENABLED and config.RELAY_MODE):
+        return False
+    secret = config.relay_secret()
+    if not (config.RELAY_HOST and config.RELAY_KID and secret):
+        return False
+    quotas = quota.compute_quota(account_alias=config.ACCOUNT)
+    if not quotas:
+        return False
+    try:
+        res = relaypost.push_quota(
+            relay_host=config.RELAY_HOST, collector_id=config.COLLECTOR_ID,
+            kid=config.RELAY_KID, secret=secret, quotas=quotas,
+            clock_offset=_RELAY_CLOCK_OFFSET,
+        )
+    except netpost.PostError:
+        return False
+    if res.ok:
+        pcts = " ".join(f"{q['window_type']}={round(q['used_ratio']*100)}%" for q in quotas)
+        _log(f"quota pushed ({pcts})")
+        return True
+    if res.http_status == 401 and res.reason == "stale_timestamp":
+        _RELAY_CLOCK_OFFSET = relaypost.resync_offset(res.server_time)
+        _log(f"quota stale_timestamp → resync offset={_RELAY_CLOCK_OFFSET:+.1f}s")
+    else:
+        _log(f"quota push rejected ({res.http_status} {res.reason})")
+    return False
+
+
 def run() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -345,9 +383,14 @@ def run() -> int:
              f"aliases={config.ALIAS_FILE}")
     last_heartbeat = 0.0
     last_reap = 0.0
+    last_quota = 0.0
     while not _STOP:
         counts = drain_once(pepper, aliases)
         now = time.time()
+        # Estimated 5h + weekly quota on its own slow cadence (independent of hook traffic).
+        if config.QUOTA_ENABLED and (now - last_quota) >= config.QUOTA_INTERVAL_S:
+            _push_quota()
+            last_quota = now
         # Reap the at-rest queue/dead-letter periodically (not every fast loop).
         if now - last_reap >= 10:
             reaped = reap(now)
@@ -375,6 +418,7 @@ def run_once() -> int:
     counts = drain_once(pepper, aliases)
     reap(time.time())
     _heartbeat()
+    _push_quota()
     _log("drain-once " + " ".join(f"{k}={v}" for k, v in counts.items()))
     return 0
 

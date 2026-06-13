@@ -577,3 +577,85 @@ def test_full_session_arc_drives_frame(pepper, aliases, server_client):
             headers={"Authorization": "Bearer dev-local-token", "X-Frame-Schema-Version": "1"},
         ).json()
         assert frame["primary"]["status"] == expected, f"{rec['hook']['hook_event_name']} -> {frame['primary']['status']}"
+
+
+# --------------------------------------------------------------------------- #
+# 12. auto session title — unnamed sessions reuse the transcript's own
+#     custom-title (/rename) / ai-title (Claude's auto summary) records.
+# --------------------------------------------------------------------------- #
+def _write_transcript(tmp_path, lines):
+    p = tmp_path / "projects" / "proj" / "sess.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(json.dumps(rec) for rec in lines) + "\n")
+    return p
+
+
+@pytest.fixture
+def _title_env(tmp_path, monkeypatch):
+    from collector import normalize as nm
+
+    monkeypatch.setattr(nm, "_TRANSCRIPT_ROOTS",
+                        (os.path.realpath(str(tmp_path / "projects")),))
+    monkeypatch.setattr(config, "LOCAL_LABELS", True)
+    nm._title_cache.clear()
+    yield nm
+    nm._title_cache.clear()
+
+
+def test_unnamed_session_gets_newest_transcript_ai_title(_title_env, tmp_path, pepper, aliases):
+    tp = _write_transcript(tmp_path, [
+        {"type": "ai-title", "aiTitle": "Old stale title", "sessionId": "s"},
+        {"type": "user", "message": "irrelevant"},
+        {"type": "ai-title", "aiTitle": "Fix orphan Chrome processes", "sessionId": "s"},
+    ])
+    r = norm(claude_hook("Stop", transcript_path=str(tp)), pepper, aliases)
+    assert r.event["session_title"] == "Fix orphan Chrome processes"
+
+
+def test_transcript_custom_title_beats_newer_ai_title(_title_env, tmp_path, pepper, aliases):
+    # The user's /rename must win even when Claude wrote a NEWER ai-title after it.
+    tp = _write_transcript(tmp_path, [
+        {"type": "custom-title", "customTitle": "video5", "sessionId": "s"},
+        {"type": "ai-title", "aiTitle": "Organize skill directory", "sessionId": "s"},
+    ])
+    r = norm(claude_hook("Stop", transcript_path=str(tp)), pepper, aliases)
+    assert r.event["session_title"] == "video5"
+
+
+def test_explicit_hook_title_wins_over_transcript(_title_env, tmp_path, pepper, aliases):
+    tp = _write_transcript(tmp_path, [
+        {"type": "ai-title", "aiTitle": "Derived title", "sessionId": "s"},
+    ])
+    r = norm(claude_hook("Stop", transcript_path=str(tp), session_title="boss-name"),
+             pepper, aliases)
+    assert r.event["session_title"] == "boss-name"
+
+
+def test_transcript_outside_allowed_roots_is_ignored(_title_env, tmp_path, pepper, aliases):
+    # A hostile queue record must not turn the daemon into an arbitrary-file reader.
+    p = tmp_path / "elsewhere" / "sess.jsonl"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"type": "ai-title", "aiTitle": "evil"}) + "\n")
+    r = norm(claude_hook("Stop", transcript_path=str(p)), pepper, aliases)
+    assert "session_title" not in r.event
+
+
+def test_transcript_title_cached_after_first_read(_title_env, tmp_path, pepper, aliases):
+    tp = _write_transcript(tmp_path, [
+        {"type": "ai-title", "aiTitle": "Cached title", "sessionId": "s"},
+    ])
+    r1 = norm(claude_hook("Stop", transcript_path=str(tp)), pepper, aliases)
+    assert r1.event["session_title"] == "Cached title"
+    os.remove(tp)  # within the cache TTL the file is NOT re-read
+    r2 = norm(claude_hook("Stop", transcript_path=str(tp)), pepper, aliases)
+    assert r2.event["session_title"] == "Cached title"
+
+
+def test_relay_hmac_mode_skips_transcript_lookup(_title_env, tmp_path, monkeypatch, pepper, aliases):
+    # HMAC relay mode would render a derived title as opaque noise — skip the IO.
+    tp = _write_transcript(tmp_path, [
+        {"type": "ai-title", "aiTitle": "Readable title", "sessionId": "s"},
+    ])
+    monkeypatch.setattr(config, "LOCAL_LABELS", False)
+    r = norm(claude_hook("Stop", transcript_path=str(tp)), pepper, aliases)
+    assert "session_title" not in r.event

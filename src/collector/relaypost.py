@@ -131,6 +131,7 @@ def build_ingest_event(
     event_time: float | None = None,
     pepper: bytes,
     aliases: "S.AliasMap | None" = None,
+    local_display: bool = False,
 ) -> dict:
     """Wrap one collector shorthand body into the ingest event shape the relay
     VALIDATES (``collector_ingest_api.md`` → Body).
@@ -152,9 +153,13 @@ def build_ingest_event(
 
     # Run the ONLY transform — the collector-side sanitizer — and serialize its OUTPUT.
     # relay mode keeps the strict neutral shape (no readable display labels leak).
+    # ``local_display`` is the OWNER opt-in (config.OWNER_LABELS): relay mode normally keeps the
+    # strict neutral shape (HMAC labels, no readable names leak), but an owner mirroring to their
+    # OWN private relay can pass readable project/title labels via the sanitizer's single-owner
+    # ``display`` path. Default False keeps the public-repo posture HMAC-safe.
     src_envelope = _shorthand_to_sanitize_envelope(shorthand)
     src_envelope["event_time"] = et
-    clean = S.sanitize_event(src_envelope, aliases=aliases, pepper=pepper, local_display=False)
+    clean = S.sanitize_event(src_envelope, aliases=aliases, pepper=pepper, local_display=local_display)
 
     # clean["payload"] is already the safe OUTPUT shape (display_title/neutral aliases/
     # canonical enums, NO session_title, NO updated_at). Copy it verbatim.
@@ -260,6 +265,7 @@ def push_batch(*, relay_host: str, collector_id: str, kid: str, secret: bytes,
                shorthands: list[dict], pepper: bytes,
                aliases: "S.AliasMap | None" = None, clock_offset: float = 0.0,
                batch_id: str | None = None, idempotency_key: str | None = None,
+               local_display: bool = False,
                timeout: float = 5.0) -> RelayPushResult:
     """Sign + POST one batch of shorthand bodies to the relay.
 
@@ -275,7 +281,8 @@ def push_batch(*, relay_host: str, collector_id: str, kid: str, secret: bytes,
     """
     host = relay_host.rstrip("/")
     events = [
-        build_ingest_event(s, source_seq=i + 1, pepper=pepper, aliases=aliases)
+        build_ingest_event(s, source_seq=i + 1, pepper=pepper, aliases=aliases,
+                           local_display=local_display)
         for i, s in enumerate(shorthands)
     ]
     raw = build_request_body(events, collector_id=collector_id, batch_id=batch_id)
@@ -318,6 +325,83 @@ def push_heartbeat(*, relay_host: str, collector_id: str, kid: str, secret: byte
     host = relay_host.rstrip("/")
     ev = build_heartbeat_event()
     raw = build_request_body([ev], collector_id=collector_id)
+    ts = int(time.time() + clock_offset)
+    headers = sign_headers(secret=secret, kid=kid, collector_id=collector_id, raw_body=raw,
+                           timestamp=ts)
+    url = f"{host}/api/v1/collectors/{collector_id}/events"
+    req = urllib.request.Request(url, data=raw, method="POST", headers=headers)
+    try:
+        with _OPENER.open(req, timeout=timeout) as resp:
+            body = _read_json(resp)
+            return RelayPushResult(
+                ok=True, http_status=resp.status, server_time=int(body.get("server_time", 0)),
+                results=body.get("results") or [], body=body,
+            )
+    except urllib.error.HTTPError as e:
+        body = _read_json_from_bytes(e.read())
+        return RelayPushResult(
+            ok=False, http_status=e.code, reason=str(body.get("reason", "")),
+            server_time=int(body.get("server_time", 0)), results=body.get("results") or [],
+            body=body,
+        )
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        raise PostError(str(e)) from e
+
+
+def build_quota_event(quota: dict, *, source_seq: int, event_time: float | None = None) -> dict:
+    """Wrap one estimated quota window (``quota.compute_quota`` output) into the ``quota.window``
+    ingest event the relay validates (``validate.validateQuotaEvent``).
+
+    The payload carries ONLY neutral numeric fields (provider + neutral account + window_type +
+    used_ratio) — no transcript content, path, or prompt. There is nothing to sanitize, so (like
+    ``collector.heartbeat``) it never touches the I1 transforms; the relay validates the shape and
+    writes it straight into the materialized frame's ``quota`` block.
+    """
+    et = int(event_time if event_time is not None else time.time())
+    provider = str(quota.get("provider", "claude"))
+    account = str(quota.get("account_alias", "main"))
+    window = str(quota.get("window_type", "5h"))
+    return {
+        "event_id": "qta_" + secrets.token_hex(8),
+        "event_type": "quota.window",
+        "provider": provider,
+        "provider_event_name": "quota.sample",
+        "account_alias": account,
+        "source_seq": source_seq,
+        "event_time": et,
+        "dedupe_key": f"quota:{provider}:{account}:{window}:{et}",
+        "payload": _quota_payload(quota, window),
+    }
+
+
+def _quota_payload(quota: dict, window: str) -> dict:
+    """Numeric quota payload + optional display metadata (plan tier + reset epoch) when present."""
+    payload = {
+        "window_type": window,
+        "used_ratio": float(quota.get("used_ratio", 0.0)),
+        "confidence": str(quota.get("confidence", "low")),
+        "is_estimated": bool(quota.get("is_estimated", True)),
+    }
+    plan = quota.get("plan")
+    if plan:
+        payload["plan"] = str(plan)
+    reset = quota.get("reset_at")
+    if isinstance(reset, (int, float)) and not isinstance(reset, bool) and reset > 0:
+        payload["reset_at"] = int(reset)
+    return payload
+
+
+def push_quota(*, relay_host: str, collector_id: str, kid: str, secret: bytes,
+               quotas: list[dict], clock_offset: float = 0.0, timeout: float = 5.0) -> RelayPushResult:
+    """Sign + POST a batch of ``quota.window`` events to the relay (one per window).
+
+    Same signed-batch transport as ``push_batch``/``push_heartbeat`` (the cloud only accepts SIGNED
+    ingest batches), but the events are payload-numeric quota samples — no collector-side sanitizer
+    runs. Raises ``PostError`` only on a transport failure (caller leaves it for the next cycle).
+    """
+    host = relay_host.rstrip("/")
+    events = [build_quota_event(q, source_seq=i + 1) for i, q in enumerate(quotas)]
+    raw = build_request_body(events, collector_id=collector_id)
     ts = int(time.time() + clock_offset)
     headers = sign_headers(secret=secret, kid=kid, collector_id=collector_id, raw_body=raw,
                            timestamp=ts)
